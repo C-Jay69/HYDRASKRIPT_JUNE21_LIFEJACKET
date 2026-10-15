@@ -886,7 +886,11 @@ export async function generateChapterIllustration(bookId: string, ownerId: strin
     finalPrompt = `Character consistency: The main character is named ${hero}. ${illustrationPrompt}. Ensure ${hero} looks the same as in previous illustrations.`;
   }
 
-  return generateImage({ prompt: finalPrompt, style, size: '1344x768', ownerId, bookId, assetType: 'illustration' });
+  // For children's books, ensure we're generating full-color illustrations
+  // that can be paired with text on 50% of the page
+  const effectiveStyle = style;
+
+  return generateImage({ prompt: finalPrompt, style: effectiveStyle, size: '1344x768', ownerId, bookId, assetType: 'illustration' });
 }
 
 /**

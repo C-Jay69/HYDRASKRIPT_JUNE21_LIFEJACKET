@@ -426,22 +426,28 @@ export async function generateChapter(bookId: string, ownerId: string, jobId: st
     // Handle Illustrations
     if (isChildrenBook && !isColoringBook) {
       try {
-        // For children's books, we can be more efficient with illustration generation
-        // Use simpler prompts and add timeouts to prevent long waits
+        // For children's books, generate full-color illustrations that represent the content
         const illustrationPrompt = chapter.synopsis || chapter.title;
 
-        // For very young children (0-5), use even simpler prompts
+        // For very young children (0-5), use even simpler prompts that focus on key elements
         let simplifiedPrompt = illustrationPrompt;
         if (targetAudience === '0-5') {
-          // Simplify for toddlers - focus on basic elements
+          // Simplify for toddlers - focus on basic elements like animals, colors, shapes
           simplifiedPrompt = illustrationPrompt
             .split(/[.,!?]/)[0] // Take just the first sentence if possible
             .replace(/[^a-zA-Z0-9\s]/g, '') // Remove special characters
             .substring(0, 100); // Limit length
+
+          // Add emphasis on visual elements for very young children
+          simplifiedPrompt = `Illustration of ${simplifiedPrompt}. Focus on bright colors, simple shapes, recognizable objects. Suitable for toddlers.`;
+        } else {
+          // For older children, keep more descriptive content
+          simplifiedPrompt = `Illustration of ${simplifiedPrompt}. High quality, detailed, appropriate for children's book.`;
         }
 
-        // For children's books, use lineart style to trigger OpenRouter/Meta Muse
-        const illustration = await generateChapterIllustration(bookId, ownerId, chapterIndex, simplifiedPrompt, 'lineart');
+        // For children's books, use pixar style (full color) instead of lineart
+        // This provides full-color illustrations that represent the content
+        const illustration = await generateChapterIllustration(bookId, ownerId, chapterIndex, simplifiedPrompt, 'pixar');
         if (illustration.success && illustration.publicUrl) {
           await db.chapter.update({ where: { id: chapter.id }, data: { illustrationUrl: illustration.publicUrl, illustrationPrompt: simplifiedPrompt } });
         }
@@ -460,7 +466,7 @@ export async function generateChapter(bookId: string, ownerId: string, jobId: st
           coloringSubject = words.join(' ');
         }
 
-        // For coloring books, use lineart style to trigger OpenRouter/Meta Muse
+        // For coloring books, use lineart style to create proper coloring pages
         const coloringPage = await generateColoringPage(bookId, ownerId, chapterIndex, coloringSubject, coloringTheme, targetAudience);
         if (coloringPage.success && coloringPage.publicUrl) {
           await db.chapter.update({ where: { id: chapter.id }, data: { illustrationUrl: coloringPage.publicUrl } });
