@@ -6,6 +6,7 @@ import { askLLMJSONWithFallback, askLLMWithFallback } from '@/lib/llm/fallback';
 import { getOutlinePrompt, getOutlineUserPrompt, getChapterWritePrompt, getChapterUserPrompt, getChildrensChapterPrompt, getColoringOutlinePrompt, getColoringOutlineUserPrompt, getColoringChapterPrompt } from '@/lib/llm/prompts';
 import { BookOutlineSchema, validateOrThrow } from '@/lib/llm/schema';
 import { generateBookCover, generateChapterIllustration, generateColoringPage } from '@/lib/services/imageService';
+import { buildKidsIllustrationPrompt, getAdventureToken, stripAdventureToken } from '@/lib/utils/kidsBook';
 import { getStyleSystemPrompt } from '@/lib/services/styleAnalyzer';
 import { assembleBooksManuscript, enqueueEditorialReview } from '@/lib/services/editorialReview';
 import { extractEntitiesFromManuscript } from '@/lib/story-bible-extraction';
@@ -194,21 +195,23 @@ export async function generateOutline(bookId: string, ownerId: string, jobId: st
     console.log(`[DEBUG] 6. AI responded! Validating schema...`);
     const outline = validateOrThrow(BookOutlineSchema, outlineResult);
 
-    // Validate adventure token if adventureType is set
+    // Adventure-setting compliance check. The outliner is asked to prefix every
+    // synopsis with a sentinel token so we can measure whether it honoured the
+    // setting. The token is a *marker*, not story content: once measured we
+    // strip it from titles and synopses so it never leaks into the outline
+    // editor, the chapter-writing prompt, the illustration prompt, or the PDF.
     if (book.adventureType) {
-        const adventureToken = `AdventureSettingToken: ${book.adventureType.replace(/[^\w\s]/g, '').toUpperCase()}`;
-        let chaptersFixed = 0;
+        const adventureToken = getAdventureToken(book.adventureType).toUpperCase();
+        let missing = 0;
         for (const chapter of outline.chapters) {
           const titleHasToken = chapter.title?.toUpperCase().includes(adventureToken) ?? false;
           const synopsisHasToken = chapter.synopsis?.toUpperCase().includes(adventureToken) ?? false;
-          if (!titleHasToken && !synopsisHasToken) {
-            // Auto-inject the token into the synopsis if missing
-            chapter.synopsis = `${adventureToken} - ${chapter.synopsis || ''}`;
-            chaptersFixed++;
-          }
+          if (!titleHasToken && !synopsisHasToken) missing++;
+          chapter.title = stripAdventureToken(chapter.title) || chapter.title;
+          chapter.synopsis = stripAdventureToken(chapter.synopsis);
         }
-        if (chaptersFixed > 0) {
-          console.log(`[Outline Validation] Auto-injected adventure token "${adventureToken}" into ${chaptersFixed} chapter(s).`);
+        if (missing > 0) {
+          console.warn(`[Outline Validation] ${missing}/${outline.chapters.length} chapter(s) omitted the adventure token for "${book.adventureType}". Setting is still enforced in the chapter prompt.`);
         }
     }
 
@@ -340,14 +343,17 @@ export async function generateChapter(bookId: string, ownerId: string, jobId: st
         ? (book.characterNames as string[])
         : [];
 
+      // Defensive: older books may still carry the sentinel token in stored synopses.
+      const cleanSynopsis = stripAdventureToken(chapter.synopsis) || chapter.synopsis;
       const chapterPrompt = getChapterWritePrompt(stylePrompt, book.title, genre, chapterIndex, totalChapters, previousSummary, characterNames.length > 0 ? characterNames : undefined, {
         description: book.description ?? undefined,
-        fullOutline: fullOutline || undefined,
-        currentSynopsis: `${chapter.title}: ${chapter.synopsis}`,
+        fullOutline: stripAdventureToken(fullOutline) || undefined,
+        currentSynopsis: `${chapter.title}: ${cleanSynopsis}`,
+        adventureType: book.adventureType ?? undefined,
       });
       const childrensPrompt = isChildrenBook ? getChildrensChapterPrompt(targetAudience) : '';
       fullSystemPrompt = childrensPrompt ? `${childrensPrompt}\n\n${chapterPrompt}` : chapterPrompt;
-      chapterUser = getChapterUserPrompt(chapter.title, chapter.synopsis, chapter.wordTarget);
+      chapterUser = getChapterUserPrompt(chapter.title, cleanSynopsis, chapter.wordTarget);
     }
 
     // Per-chapter timeout: 10 minutes max for the entire LLM call chain.
@@ -396,7 +402,16 @@ export async function generateChapter(bookId: string, ownerId: string, jobId: st
     // Handle Illustrations
     if (isChildrenBook && !isColoringBook) {
       try {
-        const illustrationPrompt = chapter.synopsis || chapter.title;
+        const kidsCast: string[] = Array.isArray(book.characterNames) ? (book.characterNames as string[]) : [];
+        const illustrationPrompt = buildKidsIllustrationPrompt({
+          scene: chapter.synopsis || chapter.title,
+          audience: targetAudience,
+          adventureType: book.adventureType,
+          characterNames: kidsCast,
+          bookTitle: book.title,
+        });
+        // Cast anchoring is already baked into the prompt above; don't pass names
+        // again or the consistency preamble would be duplicated.
         const illustration = await generateChapterIllustration(bookId, ownerId, chapterIndex, illustrationPrompt, config.illustrationStyle);
         if (illustration.success && illustration.publicUrl) {
           await db.chapter.update({ where: { id: chapter.id }, data: { illustrationUrl: illustration.publicUrl, illustrationPrompt } });
@@ -588,7 +603,11 @@ export async function finalizeBook(bookId: string, ownerId: string, jobId: strin
     // Cover Art
     if (isChildrenBook || isColoringBook || !book.coverImageUrl) {
       await jobQueue.updateJobStatus(jobId, { progressMessage: 'Creating cover art...', progressPercent: 50 });
-      const coverResult = await generateBookCover(bookId, ownerId, book.title, genre, targetAudience, coloringTheme);
+      const coverResult = await generateBookCover(bookId, ownerId, book.title, genre, targetAudience, coloringTheme, {
+        adventureType: book.adventureType,
+        characterNames: Array.isArray(book.characterNames) ? (book.characterNames as string[]) : [],
+        description: book.description,
+      });
       if (coverResult.success && coverResult.publicUrl) {
         await db.book.update({ where: { id: bookId }, data: { coverImageUrl: coverResult.publicUrl } });
       }

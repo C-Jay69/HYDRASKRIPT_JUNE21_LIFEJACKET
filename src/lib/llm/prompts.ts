@@ -3,6 +3,7 @@
 
 import type { TargetAudience, Genre, ColoringTheme } from '@/types';
 import { COLORING_THEMES } from '@/types';
+import { getAdventureLabel, getAdventureToken } from '@/lib/utils/kidsBook';
 
 // ─── Outline Generation ───────────────────────────────────────────────────────
 
@@ -27,9 +28,9 @@ export function getOutlinePrompt(
   let adventureNote = '';
   let adventureToken = '';
   if (adventureType) {
-    const safeAdventure = adventureType.replace(/[^\w\s]/g, '').toUpperCase();
-    adventureToken = `AdventureSettingToken: ${safeAdventure}`;
-    adventureNote = `\nThe story takes place ${adventureType.replace(/-/g, ' ')}. EVERY chapter must be set there.\n\nCRITICAL: Start EVERY chapter synopsis with: ${adventureToken}\n\nExample synopsis: "${adventureToken} - The hero enters the barn and finds a baby chick."`;
+    adventureToken = getAdventureToken(adventureType);
+    const setting = getAdventureLabel(adventureType);
+    adventureNote = `\nThe story takes place ${setting}. EVERY chapter must be set ${setting}.\n\nCRITICAL: Start EVERY chapter synopsis with: ${adventureToken}\n\nExample synopsis: "${adventureToken} - The hero explores ${setting} and makes a new friend."`;
   }
 
   let descriptionNote = '';
@@ -81,6 +82,7 @@ export function getChapterWritePrompt(
     description?: string | null;
     fullOutline?: string | null;
     currentSynopsis?: string | null;
+    adventureType?: string | null;
   }
 ): string {
   const isFirstChapter = chapterIndex === 0;
@@ -114,9 +116,14 @@ export function getChapterWritePrompt(
     ? `\nTHIS CHAPTER'S BRIEF (follow it exactly — characters, events, and setting must match):\n${extraContext.currentSynopsis.trim().slice(0, 1500)}`
     : '';
 
+  const adventureSetting = getAdventureLabel(extraContext?.adventureType);
+  const settingNote = adventureSetting
+    ? `\nSETTING: The entire story takes place ${adventureSetting}. This chapter MUST stay ${adventureSetting} — do not move the action elsewhere.`
+    : '';
+
   return `You are an expert ${genre} author writing chapter ${chapterIndex + 1} of "${bookTitle}". ${stylePrompt ? `Write in this style: ${stylePrompt}` : ''}
 
-${continuityNote}${characterNote}${plotNote}${outlineNote}${synopsisNote}
+${continuityNote}${characterNote}${settingNote}${plotNote}${outlineNote}${synopsisNote}
 
 Write the COMPLETE chapter as continuous prose. Output ONLY the chapter text — no JSON, no markdown, no code fences, no commentary, and no separate "title" or "summary" lines. Begin directly with the narrative.
 

@@ -3,6 +3,7 @@
 import { saveBase64File, generateFilename, createMediaAsset } from '@/lib/utils/storage';
 import { STYLE_CONFIG, COLORING_THEMES } from '@/types';
 import type { ColoringTheme, TargetAudience } from '@/types';
+import { buildKidsCoverPrompt } from '@/lib/utils/kidsBook';
 
 type ImageSize = '1024x1024' | '768x1344' | '864x1152' | '1344x768' | '1152x864' | '1440x720' | '720x1440';
 
@@ -761,7 +762,15 @@ export async function generateImage(options: GenerateImageOptions): Promise<Gene
 /**
  * Generate a book cover based on genre, audience, and theme.
  */
-export async function generateBookCover(bookId: string, ownerId: string, bookTitle: string, genre: string, targetAudience: string, coloringTheme?: string | null): Promise<GeneratedImageResult> {
+export async function generateBookCover(
+  bookId: string,
+  ownerId: string,
+  bookTitle: string,
+  genre: string,
+  targetAudience: string,
+  coloringTheme?: string | null,
+  kidsContext?: { adventureType?: string | null; characterNames?: string[]; description?: string | null }
+): Promise<GeneratedImageResult> {
   const isChildrenBook = ['0-5', '6-9', '10-14'].includes(targetAudience);
   const isColoringBook = genre === 'coloring';
   const style = isColoringBook
@@ -773,7 +782,13 @@ export async function generateBookCover(bookId: string, ownerId: string, bookTit
     const themeConfig = COLORING_THEMES[coloringTheme as ColoringTheme];
     coverPrompt = `${themeConfig.coverPrompt}. Book title: "${bookTitle}". Pure black and white line art, no shading.`;
   } else if (isChildrenBook) {
-    coverPrompt = `Children's book cover for "${bookTitle}". ${genre} genre. Bright, colorful, inviting, no text.`;
+    coverPrompt = buildKidsCoverPrompt({
+      bookTitle,
+      audience: targetAudience as TargetAudience,
+      adventureType: kidsContext?.adventureType,
+      characterNames: kidsContext?.characterNames,
+      description: kidsContext?.description,
+    });
   } else {
     coverPrompt = `Professional book cover for "${bookTitle}". ${genre} genre. Cinematic, elegant, no text.`;
   }

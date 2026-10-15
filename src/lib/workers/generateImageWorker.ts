@@ -4,6 +4,7 @@
 import { db } from '@/lib/db';
 import { jobQueue } from '@/lib/workers/queue';
 import { generateBookCover, generateChapterIllustration, generateColoringPage } from '@/lib/services/imageService';
+import { buildKidsIllustrationPrompt, isKidsAudience } from '@/lib/utils/kidsBook';
 import { AUDIENCE_CONFIG, type ColoringTheme, type TargetAudience } from '@/types';
 
 export async function generateImageWorker(jobId: string, assetParams: {
@@ -24,9 +25,16 @@ export async function generateImageWorker(jobId: string, assetParams: {
 
     if (type === 'cover') {
       // Look up the actual book title rather than passing the hardcoded placeholder
-      const bookRecord = await db.book.findUnique({ where: { id: bookId }, select: { title: true } });
+      const bookRecord = await db.book.findUnique({
+        where: { id: bookId },
+        select: { title: true, adventureType: true, characterNames: true, description: true },
+      });
       const bookTitle = bookRecord?.title || 'Untitled';
-      result = await generateBookCover(bookId, ownerId, bookTitle, genre || 'fiction', targetAudience || 'adult', coloringTheme);
+      result = await generateBookCover(bookId, ownerId, bookTitle, genre || 'fiction', targetAudience || 'adult', coloringTheme, {
+        adventureType: bookRecord?.adventureType,
+        characterNames: Array.isArray(bookRecord?.characterNames) ? (bookRecord!.characterNames as string[]) : [],
+        description: bookRecord?.description,
+      });
     } else if (type === 'coloring_page') {
       if (chapterIndex === undefined) throw new Error('chapterIndex is required for coloring pages');
       // The synopsis is the art-director's visual brief for a coloring page; the
@@ -37,8 +45,23 @@ export async function generateImageWorker(jobId: string, assetParams: {
       result = await generateColoringPage(bookId, ownerId, chapterIndex, subject, coloringTheme as ColoringTheme | null | undefined);
     } else {
       // Illustration
-      const targetPrompt = prompt || 'A cinematic scene from the story';
       const style = targetAudience ? AUDIENCE_CONFIG[targetAudience as TargetAudience]?.illustrationStyle || 'pixar' : 'pixar';
+      let targetPrompt = prompt || 'A cinematic scene from the story';
+      if (isKidsAudience(targetAudience)) {
+        // Kids books: anchor the hero/friends + adventure setting and scrub the
+        // outline sentinel token so it never reaches the image model.
+        const bookRecord = await db.book.findUnique({
+          where: { id: bookId },
+          select: { title: true, adventureType: true, characterNames: true },
+        });
+        targetPrompt = buildKidsIllustrationPrompt({
+          scene: targetPrompt,
+          audience: targetAudience as TargetAudience,
+          adventureType: bookRecord?.adventureType,
+          characterNames: Array.isArray(bookRecord?.characterNames) ? (bookRecord!.characterNames as string[]) : [],
+          bookTitle: bookRecord?.title,
+        });
+      }
       result = await generateChapterIllustration(bookId, ownerId, chapterIndex || 0, targetPrompt, style);
     }
 
