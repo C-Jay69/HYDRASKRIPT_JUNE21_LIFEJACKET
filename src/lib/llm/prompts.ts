@@ -29,7 +29,7 @@ export function getOutlinePrompt(
   if (adventureType) {
     const safeAdventure = adventureType.replace(/[^\w\s]/g, '').toUpperCase();
     adventureToken = `AdventureSettingToken: ${safeAdventure}`;
-    adventureNote = `\nAdventure setting: The story takes place ${adventureType.replace(/-/g, ' ')}. All chapters MUST be set in this location.\n\nMANDATORY: Every chapter's synopsis MUST include this exact token: ${adventureToken}\n\nExample of correct format:\n  "title": "The Castle Gates",\n  "synopsis": "AdventureSettingToken: CASTLE - The hero enters the ancient castle gates and discovers a hidden passage.",\n  "wordTarget": 1500\n\nDo NOT omit the token. Do NOT modify the token format. It must appear exactly as shown above in EVERY chapter synopsis.`;
+    adventureNote = `\nThe story takes place ${adventureType.replace(/-/g, ' ')}. EVERY chapter must be set there.\n\nCRITICAL: Start EVERY chapter synopsis with: ${adventureToken}\n\nExample synopsis: "${adventureToken} - The hero enters the barn and finds a baby chick."`;
   }
 
   let descriptionNote = '';
