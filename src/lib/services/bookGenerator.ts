@@ -408,7 +408,7 @@ export async function generateChapter(bookId: string, ownerId: string, jobId: st
         // chapter "content" is poetic facing-page text that mentions colors/mood
         // and pushes the image model toward a full-color scene. Prefer the synopsis.
         const coloringSubject = chapter.synopsis?.trim() || chapterResult.content?.trim();
-        const coloringPage = await generateColoringPage(bookId, ownerId, chapterIndex, coloringSubject, coloringTheme);
+        const coloringPage = await generateColoringPage(bookId, ownerId, chapterIndex, coloringSubject, coloringTheme, targetAudience);
         if (coloringPage.success && coloringPage.publicUrl) {
           await db.chapter.update({ where: { id: chapter.id }, data: { illustrationUrl: coloringPage.publicUrl } });
         }

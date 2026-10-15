@@ -2,7 +2,7 @@
 // Primary backend: Google Gemini 2.5 Flash Image. Fallback: Pollinations AI.
 import { saveBase64File, generateFilename, createMediaAsset } from '@/lib/utils/storage';
 import { STYLE_CONFIG, COLORING_THEMES } from '@/types';
-import type { ColoringTheme } from '@/types';
+import type { ColoringTheme, TargetAudience } from '@/types';
 
 type ImageSize = '1024x1024' | '768x1344' | '864x1152' | '1344x768' | '1152x864' | '1440x720' | '720x1440';
 
@@ -824,7 +824,7 @@ function scrubColorWords(subject: string): string {
  */
 export async function generateColoringPage(bookId: string, ownerId: string, chapterIndex: number, subject: string, theme?: ColoringTheme | null, targetAudience?: TargetAudience): Promise<GeneratedImageResult> {
   const isAdultTheme = !!theme;
-  const isKidsBook = ['0-5', '6-9', '10-14'].includes(targetAudience);
+  const isKidsBook = targetAudience ? ['0-5', '6-9', '10-14'].includes(targetAudience) : false;
   const subjectText = scrubColorWords(subject);
 
   // One short, coherent instruction set. Long stacks of "no X, no Y" repeated
