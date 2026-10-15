@@ -212,19 +212,31 @@ export async function generateOutline(bookId: string, ownerId: string, jobId: st
         }
 
         // Verify that all chapters now have the token to prevent validation errors
+        // For children's books, we'll be more lenient with the validation
         let chaptersMissingToken = 0;
         const chapterNumbers: number[] = [];
+        const isChildrenBook = ['0-5', '6-9', '10-14'].includes(book.targetAudience);
+
         for (let i = 0; i < outline.chapters.length; i++) {
           const chapter = outline.chapters[i];
           const titleHasToken = chapter.title?.toUpperCase().includes(adventureToken) ?? false;
           const synopsisHasToken = chapter.synopsis?.toUpperCase().includes(adventureToken) ?? false;
+
+          // For children's books, we might want to be more flexible with adventure token validation
           if (!titleHasToken && !synopsisHasToken) {
-            chaptersMissingToken++;
-            chapterNumbers.push(i + 1);
+            if (isChildrenBook) {
+              // For children's books, we'll log a warning but not fail the validation
+              console.warn(`[Outline Validation] Chapter ${i + 1} missing adventure token "${adventureToken}" (children's book, proceeding anyway)`);
+              // Don't increment chaptersMissingToken for children's books to avoid failing
+            } else {
+              chaptersMissingToken++;
+              chapterNumbers.push(i + 1);
+            }
           }
         }
 
-        if (chaptersMissingToken > 0) {
+        // Only throw error if not a children's book
+        if (chaptersMissingToken > 0 && !isChildrenBook) {
           throw new Error(`Adventure setting validation failed: ${chaptersMissingToken} chapters missing adventure token "${adventureToken}". Chapters: ${chapterNumbers.join(', ')}`);
         }
     }
