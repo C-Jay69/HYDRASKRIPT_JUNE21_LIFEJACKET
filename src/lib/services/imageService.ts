@@ -335,7 +335,7 @@ async function persistAsset(params: {
 async function generateWithGemini(prompt: string, options: GenerateImageOptions): Promise<GeneratedImageResult> {
   try {
     const { GoogleGenerativeAI } = await import('@google/generative-ai');
-    const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY as string);
+    const genAI = new GoogleGenerativeAI(readEnvKey('GOOGLE_AI_API_KEY') as string);
     const modelName = process.env.GEMINI_IMAGE_MODEL || 'gemini-3.1-flash-image';
     const model = genAI.getGenerativeModel({ model: modelName });
 
@@ -538,7 +538,7 @@ async function pollPrunaStatus(statusUrl: string, apiKey: string): Promise<strin
 }
 
 async function generateWithPruna(prompt: string, size: ImageSize, options: GenerateImageOptions): Promise<GeneratedImageResult> {
-  const apiKey = process.env.PRUNA_AI_API_KEY;
+  const apiKey = readEnvKey('PRUNA_AI_API_KEY');
   if (!apiKey) return { success: false, error: 'No Pruna API key configured' };
 
   const aspect_ratio = prunaAspectRatio(size);
@@ -649,7 +649,7 @@ function stabilityAspectRatio(size: ImageSize): string {
 }
 
 async function generateWithStability(prompt: string, size: ImageSize, options: GenerateImageOptions): Promise<GeneratedImageResult> {
-  const apiKey = process.env.STABILITY_AI_API_KEY;
+  const apiKey = readEnvKey('STABILITY_AI_API_KEY');
   if (!apiKey) return { success: false, error: 'No Stability API key configured' };
 
   const aspectRatio = stabilityAspectRatio(size);
@@ -724,39 +724,103 @@ async function generateWithStability(prompt: string, size: ImageSize, options: G
   return { success: false, error: `Stability generation failed after ${maxRetries} attempts` };
 }
 
+// ─── Provider selection ──────────────────────────────────────────────────────
+
+type ImageProvider = 'stability' | 'pruna' | 'gemini' | 'pollinations';
+const ALL_IMAGE_PROVIDERS: ImageProvider[] = ['stability', 'pruna', 'gemini', 'pollinations'];
+const DEFAULT_IMAGE_PROVIDER_ORDER: ImageProvider[] = ['stability', 'pruna', 'gemini', 'pollinations'];
+
+/** Read an env var, tolerating the common .env mistakes (wrapping quotes, whitespace). */
+export function readEnvKey(name: string): string | undefined {
+  const raw = process.env[name];
+  if (!raw) return undefined;
+  const cleaned = raw.trim().replace(/^["']|["']$/g, '').trim();
+  return cleaned.length > 0 ? cleaned : undefined;
+}
+
 /**
- * Generate an image using available backends (Stability primary, Gemini & Pollinations fallback)
+ * Resolve the ordered list of image backends to try.
+ *
+ *  - IMAGE_PROVIDER_ORDER="stability,pruna"   → explicit order (unknown names ignored)
+ *  - IMAGE_ALLOW_FREE_FALLBACK="false"        → never fall back to Gemini/Pollinations
+ *
+ * Providers whose API key is missing are skipped (Pollinations needs no key).
+ */
+export function getImageProviderChain(): { chain: ImageProvider[]; skipped: string[] } {
+  const configured = readEnvKey('IMAGE_PROVIDER_ORDER');
+  let order: ImageProvider[] = DEFAULT_IMAGE_PROVIDER_ORDER;
+  if (configured) {
+    const parsed = configured
+      .split(',')
+      .map((p) => p.trim().toLowerCase())
+      .filter((p): p is ImageProvider => (ALL_IMAGE_PROVIDERS as string[]).includes(p));
+    if (parsed.length > 0) order = parsed;
+  }
+
+  const allowFree = (readEnvKey('IMAGE_ALLOW_FREE_FALLBACK') ?? 'true').toLowerCase() !== 'false';
+  const skipped: string[] = [];
+  const chain = order.filter((provider) => {
+    switch (provider) {
+      case 'stability':
+        if (readEnvKey('STABILITY_AI_API_KEY')) return true;
+        skipped.push('stability (STABILITY_AI_API_KEY not set)');
+        return false;
+      case 'pruna':
+        if (readEnvKey('PRUNA_AI_API_KEY')) return true;
+        skipped.push('pruna (PRUNA_AI_API_KEY not set)');
+        return false;
+      case 'gemini':
+        if (!allowFree) { skipped.push('gemini (IMAGE_ALLOW_FREE_FALLBACK=false)'); return false; }
+        if (readEnvKey('GOOGLE_AI_API_KEY')) return true;
+        skipped.push('gemini (GOOGLE_AI_API_KEY not set)');
+        return false;
+      case 'pollinations':
+        if (!allowFree) { skipped.push('pollinations (IMAGE_ALLOW_FREE_FALLBACK=false)'); return false; }
+        return true;
+    }
+  });
+  return { chain, skipped };
+}
+
+let loggedProviderChain = false;
+
+/**
+ * Generate an image using the configured backend chain.
+ * Default order: Stability AI → Pruna AI → Gemini → Pollinations.
  */
 export async function generateImage(options: GenerateImageOptions): Promise<GeneratedImageResult> {
-  const { prompt, style = 'pixar', size = '1024x1024', ownerId, bookId, assetType } = options;
+  const { prompt, style = 'pixar', size = '1024x1024' } = options;
   const styleConfig = STYLE_CONFIG[style] || STYLE_CONFIG.pixar;
   const enhancedPrompt = `${prompt}, ${styleConfig.prompt}`;
+  const opts = { ...options, prompt: enhancedPrompt };
 
-  // Primary: Stability AI
-  if (process.env.STABILITY_AI_API_KEY) {
-    const stabilityResult = await generateWithStability(enhancedPrompt, size, { ...options, prompt: enhancedPrompt });
-    if (stabilityResult.success) return stabilityResult;
-    console.error('[imageService] Stability image generation failed:', stabilityResult.error);
+  const { chain, skipped } = getImageProviderChain();
+  if (!loggedProviderChain) {
+    loggedProviderChain = true;
+    console.log(`[imageService] Image provider chain: ${chain.join(' → ') || '(none)'}${skipped.length ? ` | skipped: ${skipped.join('; ')}` : ''}`);
+  }
+  if (chain.length === 0) {
+    return { success: false, error: `No image backend available. Skipped: ${skipped.join('; ')}` };
   }
 
-  // Secondary: Pruna AI (P-Image) — funded, cheap, ~1s/image.
-  if (process.env.PRUNA_AI_API_KEY) {
-    const prunaResult = await generateWithPruna(enhancedPrompt, size, { ...options, prompt: enhancedPrompt });
-    if (prunaResult.success) return prunaResult;
-    console.error('[imageService] Pruna image generation failed:', prunaResult.error);
+  const errors: string[] = [];
+  for (const provider of chain) {
+    let result: GeneratedImageResult;
+    switch (provider) {
+      case 'stability':    result = await generateWithStability(enhancedPrompt, size, opts); break;
+      case 'pruna':        result = await generateWithPruna(enhancedPrompt, size, opts); break;
+      case 'gemini':       result = await generateWithGemini(enhancedPrompt, opts); break;
+      case 'pollinations': result = await generateWithPollinations(enhancedPrompt, size, options); break;
+    }
+    if (result.success) {
+      console.log(`[imageService] ${options.assetType} generated via ${provider}`);
+      return result;
+    }
+    console.error(`[imageService] ${provider} image generation failed:`, result.error);
+    errors.push(`${provider}: ${result.error}`);
   }
 
-  // Tertiary: Gemini
-  if (process.env.GOOGLE_AI_API_KEY) {
-    const geminiResult = await generateWithGemini(enhancedPrompt, { ...options, prompt: enhancedPrompt });
-    if (geminiResult.success) return geminiResult;
-    console.error('[imageService] Gemini image generation failed:', geminiResult.error);
-  }
-
-  // Fallback: Pollinations
-  const pollinationsResult = await generateWithPollinations(enhancedPrompt, size, options);
-  if (pollinationsResult.success) return pollinationsResult;
-  return { success: false, error: pollinationsResult.error || 'All image backends failed.' };
+  return { success: false, error: `All image backends failed — ${errors.join(' | ')}` };
 }
 
 /**
