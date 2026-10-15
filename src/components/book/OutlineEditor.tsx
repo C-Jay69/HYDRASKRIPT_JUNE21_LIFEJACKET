@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Sparkles, CheckCircle, ArrowRight } from 'lucide-react';
 import { toast } from '@/hooks/use-toast';
+import { stripAdventureToken } from '@/lib/utils/kidsBook';
 
 interface OutlineChapter {
   title: string;
@@ -22,7 +23,15 @@ interface OutlineEditorProps {
 }
 
 export default function OutlineEditor({ outline, onApprove, isLoading }: OutlineEditorProps) {
-  const [editedOutline, setEditedOutline] = useState<OutlineChapter[]>(outline);
+  // Scrub the kids-book sentinel token from older outlines so the user never
+  // sees "AdventureSettingToken: FARM -" in the editor.
+  const [editedOutline, setEditedOutline] = useState<OutlineChapter[]>(() =>
+    outline.map((ch) => ({
+      ...ch,
+      title: stripAdventureToken(ch.title) || ch.title,
+      synopsis: stripAdventureToken(ch.synopsis),
+    }))
+  );
 
   const handleUpdateChapter = (index: number, field: keyof OutlineChapter, value: string) => {
     const next = [...editedOutline];

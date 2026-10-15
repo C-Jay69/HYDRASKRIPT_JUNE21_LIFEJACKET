@@ -152,9 +152,15 @@ export default function CreateBookForm() {
       return;
     }
 
-    // Build character names array
-    const characterNames = showKidsPersonalization
-      ? [heroName.trim(), ...friendNames.map(n => n.trim())].filter(Boolean)
+    // Build character names array — index 0 is always the hero, so friends
+    // can't be sent without a hero name (Friend 1 would silently become the lead).
+    const trimmedFriends = friendNames.map(n => n.trim()).filter(Boolean);
+    if (showKidsPersonalization && trimmedFriends.length > 0 && !heroName.trim()) {
+      toast({ title: 'Main character needed', description: "Please enter the main character's name before adding friends.", variant: 'destructive' });
+      return;
+    }
+    const characterNames = showKidsPersonalization && heroName.trim()
+      ? [heroName.trim(), ...trimmedFriends]
       : [];
 
     setIsCreating(true);
