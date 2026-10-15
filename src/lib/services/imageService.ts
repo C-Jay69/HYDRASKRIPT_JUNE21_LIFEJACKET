@@ -822,8 +822,9 @@ function scrubColorWords(subject: string): string {
 /**
  * Generate a coloring page with appropriate style for children or adults.
  */
-export async function generateColoringPage(bookId: string, ownerId: string, chapterIndex: number, subject: string, theme?: ColoringTheme | null): Promise<GeneratedImageResult> {
+export async function generateColoringPage(bookId: string, ownerId: string, chapterIndex: number, subject: string, theme?: ColoringTheme | null, targetAudience?: TargetAudience): Promise<GeneratedImageResult> {
   const isAdultTheme = !!theme;
+  const isKidsBook = ['0-5', '6-9', '10-14'].includes(targetAudience);
   const subjectText = scrubColorWords(subject);
 
   // One short, coherent instruction set. Long stacks of "no X, no Y" repeated
@@ -832,9 +833,12 @@ export async function generateColoringPage(bookId: string, ownerId: string, chap
   // for the same reason: it carries more color vocabulary than the subject does.
   const artDirection = isAdultTheme
     ? 'Draw the subject as intricate black contour line art: fine, even line weight, ornamental detail, and white space inside every shape so it can be colored in.'
-    : 'Draw the subject as simple bold black outline art: thick even lines, basic shapes, and large open white areas so a child can color them in.';
+    : isKidsBook
+      ? 'Draw the subject as simple bold black outline art: thick even lines, basic shapes, and large open white areas so a child can color them in.'
+      : 'Draw the subject as intricate black contour line art: fine, even line weight, ornamental detail, and white space inside every shape so it can be colored in.';
 
-  const prompt = `${isAdultTheme ? 'Adult' : 'Children\'s'} coloring book page, black outline drawing on a pure white background. Subject: ${subjectText}. ${artDirection} Outlines only: no color, no shading, no gradients, no filled areas, no background texture.`;
+  const ageDescriptor = isKidsBook ? 'Children\'s' : 'Adult';
+  const prompt = `${ageDescriptor} coloring book page, black outline drawing on a pure white background. Subject: ${subjectText}. ${artDirection} Outlines only: no color, no shading, no gradients, no filled areas, no background texture.`;
 
   return generateImage({
     prompt,
