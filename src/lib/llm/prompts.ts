@@ -218,11 +218,20 @@ export function getChildrensChapterPrompt(audience: TargetAudience): string {
 
 // ─── Coloring Book Outline ────────────────────────────────────────────────────
 
-export function getColoringOutlinePrompt(theme: ColoringTheme, chapterCount: number): string {
+export function getColoringOutlinePrompt(theme: ColoringTheme, chapterCount: number, targetAudience?: TargetAudience): string {
   const themeConfig = COLORING_THEMES[theme];
   const themeLabel = themeConfig.label;
 
-  return `You are designing a ${themeLabel} coloring book for adults. Each "chapter" is actually a coloring page with a specific subject to draw.
+  const ageGroup = targetAudience === '0-5' ? 'toddlers' : targetAudience === '6-9' ? 'young children (6-9)' : targetAudience === '10-14' ? 'pre-teens (10-14)' : 'adults';
+  const complexityNote = targetAudience === '0-5'
+    ? 'Keep designs simple with bold outlines and basic shapes that little hands can color easily.'
+    : targetAudience === '6-9'
+      ? 'Include moderate detail and fun themes appropriate for young readers.'
+      : targetAudience === '10-14'
+        ? 'Add engaging details and slightly more complex scenes for tweens to enjoy coloring.'
+        : '';
+
+  return `You are designing a ${themeLabel} coloring book for ${ageGroup}. Each "chapter" is actually a coloring page with a specific subject to draw. ${complexityNote}
 
 Create a detailed outline with exactly ${chapterCount} coloring pages. Each page should have:
 - A descriptive title for the coloring page
@@ -253,17 +262,27 @@ Guidelines:
 - Ensure visual variety across all pages`;
 }
 
-export function getColoringOutlineUserPrompt(title: string, theme: ColoringTheme): string {
+export function getColoringOutlineUserPrompt(title: string, theme: ColoringTheme, targetAudience?: TargetAudience): string {
   const themeConfig = COLORING_THEMES[theme];
-  return `Create a complete outline for an adult coloring book titled "${title}" with the theme "${themeConfig.label}". ${themeConfig.description}. Make each page visually unique and captivating.`;
+  const audienceLabel = targetAudience === '0-5' ? 'young children' : targetAudience === '6-9' ? 'children (ages 6-9)' : targetAudience === '10-14' ? 'pre-teens (ages 10-14)' : 'adults';
+  return `Create a complete outline for a coloring book for ${audienceLabel} titled "${title}" with the theme "${themeConfig.label}". ${themeConfig.description}. Make each page visually unique and captivating.`;
 }
 
 // ─── Coloring Page Content ────────────────────────────────────────────────────
 
-export function getColoringChapterPrompt(theme: ColoringTheme, pageIndex: number, totalPages: number): string {
+export function getColoringChapterPrompt(theme: ColoringTheme, pageIndex: number, totalPages: number, targetAudience?: TargetAudience): string {
   const themeConfig = COLORING_THEMES[theme];
-  return `You are creating the text description for page ${pageIndex + 1} of an adult coloring book about ${themeConfig.label}. 
-Write a brief, evocative 2-3 sentence description that would accompany this coloring page — like the text you'd see on the facing page of an adult coloring book. It should be poetic, calming, and thematically relevant.
+  const audienceLabel = targetAudience === '0-5' ? 'young children' : targetAudience === '6-9' ? 'children (ages 6-9)' : targetAudience === '10-14' ? 'pre-teens (ages 10-14)' : 'adults';
+  const tone = targetAudience === '0-5'
+    ? 'simple, cheerful language with fun, easy concepts'
+    : targetAudience === '6-9'
+      ? 'engaging, age-appropriate text with wonder and curiosity'
+      : targetAudience === '10-14'
+        ? 'intriguing, slightly more sophisticated description'
+        : 'poetic, calming language';
+
+  return `You are creating the text description for page ${pageIndex + 1} of a coloring book for ${audienceLabel} about ${themeConfig.label}.
+Write a brief, evocative 2-3 sentence description that would accompany this coloring page — like the text you'd see on the facing page. It should be ${tone} and thematically relevant.
 
 IMPORTANT: Respond with valid JSON only in this exact format:
 {

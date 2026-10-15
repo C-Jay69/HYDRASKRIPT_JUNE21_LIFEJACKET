@@ -175,8 +175,8 @@ export async function generateOutline(bookId: string, ownerId: string, jobId: st
     let outlineUser: string;
 
     if (genre === 'coloring' && coloringTheme && COLORING_THEMES[coloringTheme]) {
-      outlinePrompt = getColoringOutlinePrompt(coloringTheme, chapterCount);
-      outlineUser = getColoringOutlineUserPrompt(book.title, coloringTheme);
+      outlinePrompt = getColoringOutlinePrompt(coloringTheme, chapterCount, targetAudience);
+      outlineUser = getColoringOutlineUserPrompt(book.title, coloringTheme, targetAudience);
     } else {
       console.log(`[DEBUG] 4. Parsing character names...`);
       // characterNames is Postgres String[] — Prisma returns a JS array directly, never a JSON string
@@ -332,8 +332,8 @@ export async function generateChapter(bookId: string, ownerId: string, jobId: st
     let chapterUser: string;
 
     if (isColoringBook && coloringTheme && COLORING_THEMES[coloringTheme]) {
-      fullSystemPrompt = getColoringChapterPrompt(coloringTheme, chapterIndex, totalChapters);
-      chapterUser = `Write a brief, poetic description for the coloring page titled "${chapter.title}". Visual subject: ${chapter.synopsis}`;
+      fullSystemPrompt = getColoringChapterPrompt(coloringTheme, chapterIndex, totalChapters, targetAudience);
+      chapterUser = `Write a brief, age-appropriate description for the coloring page titled "${chapter.title}". Visual subject: ${chapter.synopsis}.`;
     } else {
       // characterNames is Postgres String[] — Prisma returns a JS array directly, never a JSON string
       const characterNames: string[] = Array.isArray(book.characterNames)
