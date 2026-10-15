@@ -379,9 +379,10 @@ export async function generateChapter(bookId: string, ownerId: string, jobId: st
       chapterUser = getChapterUserPrompt(chapter.title, chapter.synopsis, chapter.wordTarget);
     }
 
-    // Per-chapter timeout: 10 minutes max for the entire LLM call chain.
+    // Per-chapter timeout: 5 minutes max for the entire LLM call chain.
     // Prevents the triple-redundancy fallback from hanging for 2+ hours.
-    const CHAPTER_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+    // Reduced for children's books to prevent timeouts
+    const CHAPTER_TIMEOUT_MS = isChildrenBook ? 5 * 60 * 1000 : 10 * 60 * 1000; // 5 or 10 minutes
     const llmCall = askLLMWithFallback(fullSystemPrompt, chapterUser, 0.7, 8192);
     const timeoutCall = new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error(`Chapter generation timed out after ${CHAPTER_TIMEOUT_MS / 1000}s — all LLM providers may be unreachable`)), CHAPTER_TIMEOUT_MS)
@@ -425,23 +426,49 @@ export async function generateChapter(bookId: string, ownerId: string, jobId: st
     // Handle Illustrations
     if (isChildrenBook && !isColoringBook) {
       try {
+        // For children's books, we can be more efficient with illustration generation
+        // Use simpler prompts and add timeouts to prevent long waits
         const illustrationPrompt = chapter.synopsis || chapter.title;
-        const illustration = await generateChapterIllustration(bookId, ownerId, chapterIndex, illustrationPrompt, config.illustrationStyle);
-        if (illustration.success && illustration.publicUrl) {
-          await db.chapter.update({ where: { id: chapter.id }, data: { illustrationUrl: illustration.publicUrl, illustrationPrompt } });
+
+        // For very young children (0-5), use even simpler prompts
+        let simplifiedPrompt = illustrationPrompt;
+        if (targetAudience === '0-5') {
+          // Simplify for toddlers - focus on basic elements
+          simplifiedPrompt = illustrationPrompt
+            .split(/[.,!?]/)[0] // Take just the first sentence if possible
+            .replace(/[^a-zA-Z0-9\s]/g, '') // Remove special characters
+            .substring(0, 100); // Limit length
         }
-      } catch (e) { console.error('Illustration failed', e); }
+
+        // For children's books, use lineart style to trigger OpenRouter/Meta Muse
+        const illustration = await generateChapterIllustration(bookId, ownerId, chapterIndex, simplifiedPrompt, 'lineart');
+        if (illustration.success && illustration.publicUrl) {
+          await db.chapter.update({ where: { id: chapter.id }, data: { illustrationUrl: illustration.publicUrl, illustrationPrompt: simplifiedPrompt } });
+        }
+      } catch (e) {
+        console.error('Illustration failed for children\'s book', e);
+        // Don't fail the whole process for illustration issues
+      }
     } else if (isColoringBook) {
       try {
-        // For coloring books the synopsis is the art-director's visual brief; the
-        // chapter "content" is poetic facing-page text that mentions colors/mood
-        // and pushes the image model toward a full-color scene. Prefer the synopsis.
-        const coloringSubject = chapter.synopsis?.trim() || chapterResult.content?.trim();
+        // For coloring books, we can be more efficient with simpler prompts
+        // For very young children, simplify the coloring subject
+        let coloringSubject = chapter.synopsis?.trim() || chapterResult.content?.trim();
+        if (targetAudience === '0-5') {
+          // Simplify for toddlers - just extract key visual elements
+          const words = coloringSubject.split(/\s+/).slice(0, 10); // Take first 10 words
+          coloringSubject = words.join(' ');
+        }
+
+        // For coloring books, use lineart style to trigger OpenRouter/Meta Muse
         const coloringPage = await generateColoringPage(bookId, ownerId, chapterIndex, coloringSubject, coloringTheme, targetAudience);
         if (coloringPage.success && coloringPage.publicUrl) {
           await db.chapter.update({ where: { id: chapter.id }, data: { illustrationUrl: coloringPage.publicUrl } });
         }
-      } catch (e) { console.error('Coloring page failed', e); }
+      } catch (e) {
+        console.error('Coloring page failed for children\'s book', e);
+        // Don't fail the whole process for illustration issues
+      }
     }
 
     // Auto-approve mode: accept this chapter and chain straight into the next one

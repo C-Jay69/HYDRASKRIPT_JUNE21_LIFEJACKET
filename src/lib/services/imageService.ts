@@ -815,10 +815,11 @@ export async function generateImage(options: GenerateImageOptions): Promise<Gene
   const enhancedPrompt = `${prompt}, ${styleConfig.prompt}`;
 
   // Check if this is a kids book or coloring book that should use Meta Muse
-  const isKidsOrColoringBook = style === 'lineart' || style === 'lineart-adult';
+  // For coloring pages and line-art styles, use OpenRouter with Meta Muse
+  const shouldUseMetaMuse = style === 'lineart' || style === 'lineart-adult';
 
   // For kids books and coloring books, prioritize OpenRouter with Meta Muse
-  if (isKidsOrColoringBook && process.env.OPENROUTER_API_KEY) {
+  if (shouldUseMetaMuse && process.env.OPENROUTER_API_KEY) {
     const openRouterResult = await generateWithOpenRouter(enhancedPrompt, { ...options, prompt: enhancedPrompt });
     if (openRouterResult.success) return openRouterResult;
     console.error('[imageService] OpenRouter with Meta Muse failed:', openRouterResult.error);
