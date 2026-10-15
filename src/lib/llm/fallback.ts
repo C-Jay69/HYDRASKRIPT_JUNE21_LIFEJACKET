@@ -1,5 +1,5 @@
 // HydraSkript - LLM fallback
-// Primary provider: NVIDIA NIM. Secondary: OpenRouter. Tertiary: Google Gemini. Quaternary: Mistral.
+// Primary provider: OpenRouter. Secondary: NVIDIA NIM. Tertiary: Google Gemini. Quaternary: Mistral.
 // Used for both structured JSON generation and free-form text (chapter prose).
 //
 // Instead of trusting a single model id (which 410s when NVIDIA retires a model
@@ -156,8 +156,8 @@ function friendlyAllProviderError(errors: string[]): string {
     );
   }
   return (
-    'Text generation failed across all providers. NVIDIA NIM: ' + errors[0] +
-    '. OpenRouter: ' + (errors[1] ?? 'n/a') +
+    'Text generation failed across all providers. OpenRouter: ' + errors[0] +
+    '. NVIDIA NIM: ' + (errors[1] ?? 'n/a') +
     '. Google Gemini: ' + (errors[2] ?? 'n/a') +
     '. Mistral: ' + (errors[3] ?? 'n/a') + '.'
   );
@@ -188,20 +188,20 @@ export async function askLLMJSONWithFallback<T>(
   const mistralModels = buildChain(preferredModel, ...MISTRAL_CHAIN);
 
   try {
-    return await tryModelChain('NVIDIA NIM', nimModels, (m) =>
-      askLLMNimJSON<T>(systemPrompt, userPrompt, temperature, m)
+    return await tryModelChain('OpenRouter', orModels, (m) =>
+      askLLMJSON<T>(systemPrompt, userPrompt, temperature, m)
     );
-  } catch (nimError) {
-    const nimMessage = nimError instanceof Error ? nimError.message : String(nimError);
-    console.warn('[LLM] NVIDIA NIM chain exhausted, falling back to OpenRouter:', nimMessage);
+  } catch (openrouterError) {
+    const orMessage = openrouterError instanceof Error ? openrouterError.message : String(openrouterError);
+    console.warn('[LLM] OpenRouter chain exhausted, falling back to NVIDIA NIM:', orMessage);
 
     try {
-      return await tryModelChain('OpenRouter', orModels, (m) =>
-        askLLMJSON<T>(systemPrompt, userPrompt, temperature, m)
+      return await tryModelChain('NVIDIA NIM', nimModels, (m) =>
+        askLLMNimJSON<T>(systemPrompt, userPrompt, temperature, m)
       );
-    } catch (openrouterError) {
-      const orMessage = openrouterError instanceof Error ? openrouterError.message : String(openrouterError);
-      console.warn('[LLM] OpenRouter chain exhausted, falling back to Gemini:', orMessage);
+    } catch (nimError) {
+      const nimMessage = nimError instanceof Error ? nimError.message : String(nimError);
+      console.warn('[LLM] NVIDIA NIM chain exhausted, falling back to Gemini:', nimMessage);
 
       try {
         return await tryModelChain('Google Gemini', geminiModels, (m) =>
@@ -219,14 +219,14 @@ export async function askLLMJSONWithFallback<T>(
           const mistralMessage = mistralError instanceof Error ? mistralError.message : String(mistralError);
 
           // Surface a friendly safety-filter error if any attempt was content-blocked.
-          const safety = safetyMessage([nimMessage, orMessage, geminiMessage, mistralMessage]);
+          const safety = safetyMessage([orMessage, nimMessage, geminiMessage, mistralMessage]);
           if (safety) {
             throw new Error(
               `Content flagged by safety filter: ${safety}. Try adjusting book themes or descriptions.`
             );
           }
 
-          const all = [nimMessage, orMessage, geminiMessage, mistralMessage];
+          const all = [orMessage, nimMessage, geminiMessage, mistralMessage];
           // Out-of-budget is a platform signal, not a content/model failure: keep
           // it as LlmBudgetExceededError so the queue re-queues (with backoff)
           // instead of treating the book as permanently failed.
@@ -244,7 +244,7 @@ export async function askLLMJSONWithFallback<T>(
 
 /**
  * Free-form text generation (chapter prose). Rotates through prose-optimized
- * models across NVIDIA NIM, OpenRouter, then Google Gemini, then Mistral. `maxTokens` must be
+ * models across OpenRouter, then NVIDIA NIM, then Google Gemini, then Mistral. `maxTokens` must be
  * large enough for a full chapter.
  */
 export async function askLLMWithFallback(
@@ -263,20 +263,20 @@ export async function askLLMWithFallback(
   const mistralModels = buildChain(preferredModel, ...MISTRAL_CHAIN);
 
   try {
-    return await tryModelChain('NVIDIA NIM', nimModels, (m) =>
-      askLLMNim(systemPrompt, userPrompt, temperature, m, maxTokens)
+    return await tryModelChain('OpenRouter', orModels, (m) =>
+      askLLM(systemPrompt, userPrompt, temperature, m, maxTokens)
     );
-  } catch (nimError) {
-    const nimMessage = nimError instanceof Error ? nimError.message : String(nimError);
-    console.warn('[LLM] NVIDIA NIM prose chain exhausted, falling back to OpenRouter:', nimMessage);
+  } catch (openrouterError) {
+    const orMessage = openrouterError instanceof Error ? openrouterError.message : String(openrouterError);
+    console.warn('[LLM] OpenRouter prose chain exhausted, falling back to NVIDIA NIM:', orMessage);
 
     try {
-      return await tryModelChain('OpenRouter', orModels, (m) =>
-        askLLM(systemPrompt, userPrompt, temperature, m, maxTokens)
+      return await tryModelChain('NVIDIA NIM', nimModels, (m) =>
+        askLLMNim(systemPrompt, userPrompt, temperature, m, maxTokens)
       );
-    } catch (openrouterError) {
-      const orMessage = openrouterError instanceof Error ? openrouterError.message : String(openrouterError);
-      console.warn('[LLM] OpenRouter prose chain exhausted, falling back to Gemini:', orMessage);
+    } catch (nimError) {
+      const nimMessage = nimError instanceof Error ? nimError.message : String(nimError);
+      console.warn('[LLM] NVIDIA NIM prose chain exhausted, falling back to Gemini:', nimMessage);
 
       try {
         return await tryModelChain('Google Gemini', geminiModels, (m) =>
@@ -292,14 +292,14 @@ export async function askLLMWithFallback(
           );
         } catch (mistralError) {
           const mistralMessage = mistralError instanceof Error ? mistralError.message : String(mistralError);
-          const safety = safetyMessage([nimMessage, orMessage, geminiMessage, mistralMessage]);
+          const safety = safetyMessage([orMessage, nimMessage, geminiMessage, mistralMessage]);
           if (safety) {
             throw new Error(
               `Content flagged by safety filter: ${safety}. Try adjusting book themes or descriptions.`
             );
           }
 
-          const all = [nimMessage, orMessage, geminiMessage, mistralMessage];
+          const all = [orMessage, nimMessage, geminiMessage, mistralMessage];
           // Out-of-budget is a platform signal, not a content/model failure: keep
           // it as LlmBudgetExceededError so the queue re-queues (with backoff)
           // instead of treating the book as permanently failed.
