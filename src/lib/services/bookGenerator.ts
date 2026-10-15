@@ -210,6 +210,23 @@ export async function generateOutline(bookId: string, ownerId: string, jobId: st
         if (chaptersFixed > 0) {
           console.log(`[Outline Validation] Auto-injected adventure token "${adventureToken}" into ${chaptersFixed} chapter(s).`);
         }
+
+        // Verify that all chapters now have the token to prevent validation errors
+        let chaptersMissingToken = 0;
+        const chapterNumbers: number[] = [];
+        for (let i = 0; i < outline.chapters.length; i++) {
+          const chapter = outline.chapters[i];
+          const titleHasToken = chapter.title?.toUpperCase().includes(adventureToken) ?? false;
+          const synopsisHasToken = chapter.synopsis?.toUpperCase().includes(adventureToken) ?? false;
+          if (!titleHasToken && !synopsisHasToken) {
+            chaptersMissingToken++;
+            chapterNumbers.push(i + 1);
+          }
+        }
+
+        if (chaptersMissingToken > 0) {
+          throw new Error(`Adventure setting validation failed: ${chaptersMissingToken} chapters missing adventure token "${adventureToken}". Chapters: ${chapterNumbers.join(', ')}`);
+        }
     }
 
     console.log(`[DEBUG] 7. Saving outline to database...`);
