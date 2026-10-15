@@ -378,6 +378,88 @@ async function generateWithGemini(prompt: string, options: GenerateImageOptions)
 }
 
 /**
+ * Backend 4: OpenRouter with Meta Muse model for Kids Books and Coloring Books.
+ * Uses the OpenRouter API with the meta/muse-image model for improved image quality
+ * specifically for children's books and coloring books.
+ */
+async function generateWithOpenRouter(prompt: string, options: GenerateImageOptions): Promise<GeneratedImageResult> {
+  try {
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) {
+      return { success: false, error: 'No OpenRouter API key configured' };
+    }
+
+    const maxRetries = 3;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const response = await fetch('https://openrouter.ai/api/v1/images/generate', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: 'meta/muse-image', // Use Meta Muse specifically for kids and coloring books
+            prompt: prompt,
+            width: 1024,
+            height: 1024,
+            n: 1,
+          }),
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          throw new Error(
+            `OpenRouter API error: ${response.status} ${response.statusText}` +
+            (errorData.error?.message ? ` - ${errorData.error.message}` : '')
+          );
+        }
+
+        const data = await response.json();
+
+        // Handle different response formats
+        let base64Data: string | undefined;
+        let mimeType: string = 'image/png';
+
+        if (data.data && Array.isArray(data.data) && data.data[0]) {
+          // New format: data array with base64 image
+          base64Data = data.data[0].base64;
+        } else if (data.image) {
+          // Old format: direct image property
+          base64Data = data.image;
+        } else if (data.images && Array.isArray(data.images) && data.images[0]) {
+          // Alternative format: images array
+          base64Data = data.images[0];
+        }
+
+        if (!base64Data) {
+          return { success: false, error: 'OpenRouter returned no image data' };
+        }
+
+        return persistAsset({
+          base64: base64Data,
+          mimeType: mimeType,
+          assetType: options.assetType,
+          style: options.style || 'pixar',
+          ownerId: options.ownerId,
+          bookId: options.bookId,
+          prompt,
+        });
+      } catch (error) {
+        if (attempt === maxRetries) {
+          throw error;
+        }
+        console.warn(`[imageService] OpenRouter failed (attempt ${attempt}/${maxRetries}):`, error instanceof Error ? error.message : String(error));
+        await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+      }
+    }
+    return { success: false, error: 'Image generation failed after all retries' };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
  * Backend 2: Pollinations AI.
  * Fetches image from URL and converts to base64. Honors the requested size,
  * model, and uses a deterministic per-book seed for character consistency.
@@ -725,11 +807,22 @@ async function generateWithStability(prompt: string, size: ImageSize, options: G
 
 /**
  * Generate an image using available backends (Stability primary, Gemini & Pollinations fallback)
+ * For kids books and coloring books, uses OpenRouter with Meta Muse model for better results
  */
 export async function generateImage(options: GenerateImageOptions): Promise<GeneratedImageResult> {
   const { prompt, style = 'pixar', size = '1024x1024', ownerId, bookId, assetType } = options;
   const styleConfig = STYLE_CONFIG[style] || STYLE_CONFIG.pixar;
   const enhancedPrompt = `${prompt}, ${styleConfig.prompt}`;
+
+  // Check if this is a kids book or coloring book that should use Meta Muse
+  const isKidsOrColoringBook = style === 'lineart' || style === 'lineart-adult';
+
+  // For kids books and coloring books, prioritize OpenRouter with Meta Muse
+  if (isKidsOrColoringBook && process.env.OPENROUTER_API_KEY) {
+    const openRouterResult = await generateWithOpenRouter(enhancedPrompt, { ...options, prompt: enhancedPrompt });
+    if (openRouterResult.success) return openRouterResult;
+    console.error('[imageService] OpenRouter with Meta Muse failed:', openRouterResult.error);
+  }
 
   // Primary: Stability AI
   if (process.env.STABILITY_AI_API_KEY) {
