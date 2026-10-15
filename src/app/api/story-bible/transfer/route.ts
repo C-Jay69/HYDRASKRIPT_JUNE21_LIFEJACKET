@@ -44,22 +44,23 @@ export async function POST(request: NextRequest) {
 
     if (input.chapters && input.chapters.length > 0) {
       const history = await Promise.all(
-        input.chapters.map((chapter) =>
-          db.storyBibleEntity.create({
+        input.chapters.map((chapter) => {
+          const synopsis = chapter.synopsis ?? '';
+          return db.storyBibleEntity.create({
             data: {
               ownerId: profile.id,
               bookId: input.bookId,
               kind: 'HISTORY',
               name: `Chapter ${chapter.number}: ${chapter.title}`,
               role: 'Story Timeline',
-              summary: chapter.synopsis.slice(0, 180),
+              summary: synopsis.slice(0, 180),
               motivation: 'Plot event that shapes the story.',
-              description: chapter.synopsis,
+              description: synopsis,
               physicalTraits: JSON.stringify({ tags: [], notes: '' }),
               secrets: JSON.stringify({ confidential: '', isPrivate: true }),
             },
-          })
-        )
+          });
+        })
       );
       created.push(...history);
     }

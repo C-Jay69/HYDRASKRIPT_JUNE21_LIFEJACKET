@@ -94,13 +94,26 @@ export async function POST(request: NextRequest) {
           'Each chapter should build naturally on the previous one, maintain narrative momentum, ' +
           'and clearly advance the plot or argument. ' +
           'Return ONLY valid JSON matching: { "chapters": [{ "number": number, "title": string, "synopsis": string }] }. ' +
-          'The synopsis for each chapter should be 1-2 sentences describing what happens.';
+          'The synopsis for each chapter should be 1-2 sentences describing what happens. ' +
+          'CRITICAL: Every chapter MUST have a meaningful, non-empty title. For children\'s books, use simple, engaging titles that young readers can understand and remember.';
 
         const userPrompt =
           `${contextLine}\n\nIdea:\n${ideaText.trim()}\n\n` +
           'Create a 10-chapter outline with clear narrative arc, compelling chapter titles, and concise synopses.';
 
-        data = await askLLMJSONWithFallback<OutlineResponse>(systemPrompt, userPrompt, 0.7);
+        const rawResult = await askLLMJSONWithFallback<OutlineResponse>(systemPrompt, userPrompt, 0.7);
+
+        // Sanitize chapter data: ensure all titles are valid strings
+        // LLMs can sometimes return empty/null titles, especially for children's content
+        const sanitizedChapters = (rawResult as any)?.chapters?.map((ch: any, idx: number) => ({
+          number: ch?.number ?? idx + 1,
+          title: typeof ch?.title === 'string' && ch.title.trim().length > 0
+            ? ch.title.trim()
+            : `Chapter ${idx + 1}`, // Fallback title if original is invalid
+          synopsis: typeof ch?.synopsis === 'string' ? ch.synopsis.trim() : '',
+        })) ?? [];
+
+        data = { chapters: sanitizedChapters } as OutlineResponse;
         break;
       }
 

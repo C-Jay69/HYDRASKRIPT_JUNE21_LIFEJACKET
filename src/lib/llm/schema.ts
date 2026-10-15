@@ -153,8 +153,8 @@ export const IdeaTransferSchema = z.object({
   blurb: z.string().optional(),
   chapters: z.array(z.object({
     number: z.number(),
-    title: z.string(),
-    synopsis: z.string(),
+    title: z.string().min(1, 'Chapter title is required').catch('Untitled Chapter'),
+    synopsis: z.string().optional().catch(''),
   })).optional(),
   coverConcept: z.string().optional(),
 });

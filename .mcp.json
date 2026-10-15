@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/c-jay69/Documents/GitHub/HYDRASKRIPT_JUNE21"],
+      "env": {}
+    }
+  }
+}
