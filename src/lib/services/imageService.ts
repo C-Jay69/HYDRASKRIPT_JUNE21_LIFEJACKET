@@ -386,12 +386,16 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
   try {
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) {
+      console.warn('[imageService] No OpenRouter API key configured for image generation');
       return { success: false, error: 'No OpenRouter API key configured' };
     }
+
+    console.log('[imageService] Attempting OpenRouter with Meta Muse model for children\'s book');
 
     const maxRetries = 3;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
+        console.log(`[imageService] OpenRouter attempt ${attempt}`);
         const response = await fetch('https://openrouter.ai/api/v1/images/generate', {
           method: 'POST',
           headers: {
@@ -399,7 +403,7 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            model: 'meta/muse-image', // Use Meta Muse specifically for kids and coloring books
+            model: 'meta/muse-image:4.0', // Use Meta Muse specifically for kids and coloring books
             prompt: prompt,
             width: 1024,
             height: 1024,
@@ -407,15 +411,18 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
           }),
         });
 
+        console.log(`[imageService] OpenRouter response status: ${response.status}`);
+
         if (!response.ok) {
           const errorData = await response.json().catch(() => ({}));
-          throw new Error(
-            `OpenRouter API error: ${response.status} ${response.statusText}` +
-            (errorData.error?.message ? ` - ${errorData.error.message}` : '')
-          );
+          const errorMsg = `OpenRouter API error: ${response.status} ${response.statusText}` +
+            (errorData.error?.message ? ` - ${errorData.error.message}` : '');
+          console.error('[imageService] OpenRouter API error:', errorMsg);
+          throw new Error(errorMsg);
         }
 
         const data = await response.json();
+        console.log('[imageService] OpenRouter response received:', data);
 
         // Handle different response formats
         let base64Data: string | undefined;
@@ -433,8 +440,11 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
         }
 
         if (!base64Data) {
+          console.error('[imageService] OpenRouter returned no image data');
           return { success: false, error: 'OpenRouter returned no image data' };
         }
+
+        console.log('[imageService] Image generation successful with OpenRouter');
 
         return persistAsset({
           base64: base64Data,
@@ -446,6 +456,7 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
           prompt,
         });
       } catch (error) {
+        console.error(`[imageService] OpenRouter attempt ${attempt} failed:`, error);
         if (attempt === maxRetries) {
           throw error;
         }
@@ -455,6 +466,7 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
     }
     return { success: false, error: 'Image generation failed after all retries' };
   } catch (error) {
+    console.error('[imageService] Unexpected error in generateWithOpenRouter:', error);
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 }
@@ -814,19 +826,30 @@ export async function generateImage(options: GenerateImageOptions): Promise<Gene
   const styleConfig = STYLE_CONFIG[style] || STYLE_CONFIG.pixar;
   const enhancedPrompt = `${prompt}, ${styleConfig.prompt}`;
 
-  // Check if this is a kids book or coloring book that should use Meta Muse
-  // For coloring pages and line-art styles, use OpenRouter with Meta Muse
-  const shouldUseMetaMuse = style === 'lineart' || style === 'lineart-adult';
+  console.log(`[imageService] generateImage called with: style=${style}, assetType=${assetType}, bookId=${bookId}`);
 
-  // For kids books and coloring books, prioritize OpenRouter with Meta Muse
-  if (shouldUseMetaMuse && process.env.OPENROUTER_API_KEY) {
+  // For children's book illustrations and covers, always try OpenRouter with Meta Muse first
+  // This ensures children's books use the Meta Muse model for better results
+  const isChildrenBookIllustration = bookId && (assetType === 'illustration' || assetType === 'cover');
+  console.log(`[imageService] isChildrenBookIllustration: ${isChildrenBookIllustration}`);
+
+  // Always try OpenRouter with Meta Muse for children's books (prioritize it)
+  if (isChildrenBookIllustration && process.env.OPENROUTER_API_KEY) {
+    console.log('[imageService] Attempting OpenRouter for children\'s book image');
     const openRouterResult = await generateWithOpenRouter(enhancedPrompt, { ...options, prompt: enhancedPrompt });
-    if (openRouterResult.success) return openRouterResult;
+    if (openRouterResult.success) {
+      console.log('[imageService] OpenRouter image generation successful');
+      return openRouterResult;
+    }
     console.error('[imageService] OpenRouter with Meta Muse failed:', openRouterResult.error);
+    // Continue to other backends if OpenRouter fails
+  } else if (isChildrenBookIllustration) {
+    console.warn('[imageService] No OpenRouter API key configured for children\'s book image');
   }
 
   // Primary: Stability AI
   if (process.env.STABILITY_AI_API_KEY) {
+    console.log('[imageService] Trying Stability AI as primary backend');
     const stabilityResult = await generateWithStability(enhancedPrompt, size, { ...options, prompt: enhancedPrompt });
     if (stabilityResult.success) return stabilityResult;
     console.error('[imageService] Stability image generation failed:', stabilityResult.error);
@@ -834,6 +857,7 @@ export async function generateImage(options: GenerateImageOptions): Promise<Gene
 
   // Secondary: Pruna AI (P-Image) — funded, cheap, ~1s/image.
   if (process.env.PRUNA_AI_API_KEY) {
+    console.log('[imageService] Trying Pruna AI as secondary backend');
     const prunaResult = await generateWithPruna(enhancedPrompt, size, { ...options, prompt: enhancedPrompt });
     if (prunaResult.success) return prunaResult;
     console.error('[imageService] Pruna image generation failed:', prunaResult.error);
@@ -841,14 +865,17 @@ export async function generateImage(options: GenerateImageOptions): Promise<Gene
 
   // Tertiary: Gemini
   if (process.env.GOOGLE_AI_API_KEY) {
+    console.log('[imageService] Trying Gemini as tertiary backend');
     const geminiResult = await generateWithGemini(enhancedPrompt, { ...options, prompt: enhancedPrompt });
     if (geminiResult.success) return geminiResult;
     console.error('[imageService] Gemini image generation failed:', geminiResult.error);
   }
 
   // Fallback: Pollinations
+  console.log('[imageService] Falling back to Pollinations');
   const pollinationsResult = await generateWithPollinations(enhancedPrompt, size, options);
   if (pollinationsResult.success) return pollinationsResult;
+  console.error('[imageService] All backends failed:', pollinationsResult.error);
   return { success: false, error: pollinationsResult.error || 'All image backends failed.' };
 }
 
