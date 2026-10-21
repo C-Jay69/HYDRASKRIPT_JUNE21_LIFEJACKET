@@ -1,63 +1,53 @@
 # Image Generation Fix Summary
 
-## Issues Identified
+## Issues Identified and Fixed
 
-1. **Primary Issue**: Pollinations account has no balance (Insufficient balance)
-2. **Secondary Issue**: Vercel Runtime Timeout Error (Task timed out after 60 seconds)
-3. **Root Cause**: System was falling back to Pollinations due to insufficient balance instead of properly using OpenRouter with Meta Muse
+### 1. API Key Configuration Issues
+- **Problem**: Duplicate OpenRouter API keys in `.env` file with inconsistent naming
+- **Solution**: Standardized API key naming and kept both `OPENROUTER_API_KEY` and `OPEN_ROUTER_API_KEY` for backward compatibility
 
-## Fixes Applied
+### 2. Timeout Issues
+- **Problem**: 20-second timeout for OpenRouter requests was too short for complex children's book image generation
+- **Solution**: Increased timeout to 30 seconds for better reliability
 
-### 1. Enhanced Timeout Handling
-- Added 15-second timeout to OpenRouter requests to prevent hanging
-- Added 20-second timeout to the main `generateImage` function
-- Added proper timeout handling for all backend calls
+### 3. Error Handling Improvements
+- **Problem**: Inconsistent API key checking and error logging
+- **Solution**: Enhanced error handling with better logging and fallback mechanisms
 
-### 2. Improved Error Handling
-- Better distinction between timeout errors and other failures
-- More descriptive error messages for balance issues
-- Graceful degradation when backends fail
+### 4. Robust API Key Detection
+- **Problem**: Code only checked `process.env.OPENROUTER_API_KEY` but env file had `OPEN_ROUTER_API_KEY`
+- **Solution**: Added fallback to check both environment variable names
 
-### 3. Optimized OpenRouter Integration
-- Ensured OpenRouter with Meta Muse model is prioritized for children's books
-- Added proper error handling and retry logic for OpenRouter
+## Files Modified
 
-## What You Need to Do
+1. **`src/lib/services/imageService.ts`** - Enhanced error handling, timeout increases, and robust API key detection
+2. **`.env`** - Fixed duplicate API key issue and maintained backward compatibility
 
-### Immediate Actions:
-1. **Fund your Pollinations account** - Visit https://enter.pollinations.ai to add credits
-2. **Verify your OpenRouter API key** - Make sure it's properly configured in `.env`
-3. **Test the OpenRouter integration** - Try a simple test to ensure it works
+## Key Changes Made
 
-### Alternative Solutions:
-If you can't fund Pollinations immediately:
-1. **Get a Stability AI API key** - This is your best fallback option
-2. **Get a Pruna AI API key** - They offer a funded balance option
-3. **Use a different image generation service**
+### In `imageService.ts`:
+- Increased OpenRouter timeout from 20s to 30s
+- Improved API key detection to check both `OPENROUTER_API_KEY` and `OPEN_ROUTER_API_KEY`
+- Enhanced error logging for better debugging
+- More robust fallback handling when OpenRouter fails
 
-### Environment Setup:
-Make sure your `.env` file contains:
-```
-OPENROUTER_API_KEY=your_openrouter_key_here
-STABILITY_AI_API_KEY=your_stability_key_here (recommended fallback)
-PRUNA_AI_API_KEY=your_pruna_key_here (alternative fallback)
-GOOGLE_AI_API_KEY=your_gemini_key_here (backup)
-```
+### In `.env`:
+- Removed duplicate API key definition
+- Maintained backward compatibility by keeping both key names
+- Clearer comments about the purpose of each key
 
-## Expected Behavior After Fix
+## Testing Recommendations
 
-When generating children's book illustrations:
-1. System will first try OpenRouter with Meta Muse model
-2. If that fails, fall back to Stability AI
-3. If that fails, fall back to Pruna AI  
-4. If that fails, fall back to Gemini
-5. If all fail, fall back to Pollinations (but with a clear error message about balance)
+1. Test with a children's book generation to ensure OpenRouter is properly utilized
+2. Verify that fallback mechanisms work when OpenRouter is unavailable
+3. Test timeout scenarios to ensure graceful degradation
+4. Confirm all image backends (Stability, Pruna, Gemini, Pollinations) work as expected
 
-## Testing
+## Debugging Tips
 
-After implementing the fixes:
-1. Try generating a simple children's book illustration
-2. Check the logs to see which backend is being used
-3. Verify that the image generation completes without timeout errors
+When troubleshooting image generation issues:
 
-The system should now properly route children's book illustrations to OpenRouter with Meta Muse model instead of falling back to Pollinations when it has insufficient funds.
+1. Check that `OPENROUTER_API_KEY` is properly set in environment variables
+2. Monitor console logs for the specific backend being used
+3. Verify that the prompt meets OpenRouter's requirements for the Meta Muse model
+4. Ensure adequate API quotas for all image generation services

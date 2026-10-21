@@ -1,0 +1,103 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Baloo 2", cursive;
+  --font-story: "Andika", sans-serif;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+/* ---------- ambient sky ---------- */
+@keyframes cloud-drift {
+  from { transform: translateX(-15vw); }
+  to   { transform: translateX(115vw); }
+}
+.cloud {
+  animation: cloud-drift linear infinite;
+}
+
+@keyframes sun-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+.sun-rays {
+  animation: sun-spin 60s linear infinite;
+  transform-origin: center;
+}
+
+@keyframes bob {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-10px); }
+}
+.bob { animation: bob 5s ease-in-out infinite; }
+
+@keyframes butterfly {
+  0%   { transform: translate(0, 0) rotate(-8deg); }
+  25%  { transform: translate(24px, -18px) rotate(8deg); }
+  50%  { transform: translate(48px, 4px) rotate(-6deg); }
+  75%  { transform: translate(20px, 16px) rotate(10deg); }
+  100% { transform: translate(0, 0) rotate(-8deg); }
+}
+.butterfly { animation: butterfly 9s ease-in-out infinite; }
+
+/* ---------- book page ---------- */
+@keyframes page-in {
+  0%   { opacity: 0; transform: perspective(1400px) rotateY(-14deg) translateX(40px); }
+  100% { opacity: 1; transform: perspective(1400px) rotateY(0deg) translateX(0); }
+}
+.page-in {
+  animation: page-in 0.65s cubic-bezier(0.22, 1, 0.36, 1) both;
+  transform-origin: left center;
+}
+.page-in-reverse {
+  animation: page-in 0.65s cubic-bezier(0.22, 1, 0.36, 1) both;
+  transform-origin: right center;
+  animation-name: page-in-back;
+}
+@keyframes page-in-back {
+  0%   { opacity: 0; transform: perspective(1400px) rotateY(14deg) translateX(-40px); }
+  100% { opacity: 1; transform: perspective(1400px) rotateY(0deg) translateX(0); }
+}
+
+@keyframes line-up {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.line-up {
+  opacity: 0;
+  animation: line-up 0.6s ease-out forwards;
+}
+
+@keyframes zoom-soft {
+  from { transform: scale(1.08); }
+  to   { transform: scale(1); }
+}
+.zoom-soft { animation: zoom-soft 6s ease-out both; }
+
+@keyframes wiggle {
+  0%, 100% { transform: rotate(-3deg); }
+  50%      { transform: rotate(3deg); }
+}
+.wiggle-hover:hover { animation: wiggle 0.4s ease-in-out infinite; }
+
+@keyframes sound-pulse {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.15); }
+}
+.sound-pulse { animation: sound-pulse 0.9s ease-in-out infinite; }
+
+/* drop cap for the story text */
+.drop-cap::first-letter {
+  font-family: "Baloo 2", cursive;
+  font-weight: 800;
+  color: inherit;
+  float: left;
+  font-size: 3.4em;
+  line-height: 0.85;
+  padding-right: 0.12em;
+  padding-top: 0.05em;
+}

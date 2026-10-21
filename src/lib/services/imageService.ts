@@ -384,7 +384,7 @@ async function generateWithGemini(prompt: string, options: GenerateImageOptions)
  */
 async function generateWithOpenRouter(prompt: string, options: GenerateImageOptions): Promise<GeneratedImageResult> {
   try {
-    const apiKey = process.env.OPENROUTER_API_KEY;
+    const apiKey = process.env.OPENROUTER_API_KEY || process.env.OPEN_ROUTER_API_KEY;
     if (!apiKey) {
       console.warn('[imageService] No OpenRouter API key configured for image generation');
       return { success: false, error: 'No OpenRouter API key configured' };
@@ -397,9 +397,9 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
       try {
         console.log(`[imageService] OpenRouter attempt ${attempt}`);
 
-        // Add timeout to prevent hanging
+        // Add timeout to prevent hanging - increased to 30 seconds for better reliability
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout
+        const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
 
         const response = await fetch('https://openrouter.ai/api/v1/images/generate', {
           method: 'POST',
@@ -849,37 +849,40 @@ export async function generateImage(options: GenerateImageOptions): Promise<Gene
   console.log(`[imageService] isChildrenBookIllustration: ${isChildrenBookIllustration}`);
 
   // Try OpenRouter with Meta Muse for children's books first
-  if (isChildrenBookIllustration && process.env.OPENROUTER_API_KEY) {
+  if (isChildrenBookIllustration) {
     console.log('[imageService] Attempting OpenRouter for children\'s book image');
 
-    // Log that we're going to try OpenRouter for children's books
-    console.log('[imageService] Attempting OpenRouter with Meta Muse model for children\'s book');
+    // Check for OpenRouter API key
+    const openRouterApiKey = process.env.OPENROUTER_API_KEY || process.env.OPEN_ROUTER_API_KEY;
+    if (!openRouterApiKey) {
+      console.warn('[imageService] No OpenRouter API key configured for children\'s book image');
+    } else {
+      console.log('[imageService] Attempting OpenRouter with Meta Muse model for children\'s book');
 
-    // Add timeout to prevent hanging
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 20000); // 20 second timeout
+      // Add timeout to prevent hanging - increased to 30 seconds for better reliability
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
 
-    try {
-      const openRouterResult = await generateWithOpenRouter(enhancedPrompt, { ...options, prompt: enhancedPrompt });
-      clearTimeout(timeoutId);
+      try {
+        const openRouterResult = await generateWithOpenRouter(enhancedPrompt, { ...options, prompt: enhancedPrompt });
+        clearTimeout(timeoutId);
 
-      if (openRouterResult.success) {
-        console.log('[imageService] OpenRouter image generation successful');
-        return openRouterResult;
-      }
-      console.error('[imageService] OpenRouter with Meta Muse failed:', openRouterResult.error);
-      // Continue to other backends if OpenRouter fails
-    } catch (error) {
-      clearTimeout(timeoutId);
-      console.error('[imageService] OpenRouter with Meta Muse failed with error:', error);
-      if (error instanceof Error && error.name === 'AbortError') {
-        console.error('[imageService] OpenRouter request timed out');
+        if (openRouterResult.success) {
+          console.log('[imageService] OpenRouter image generation successful');
+          return openRouterResult;
+        }
+        console.error('[imageService] OpenRouter with Meta Muse failed:', openRouterResult.error);
+        // Continue to other backends if OpenRouter fails
+      } catch (error) {
+        clearTimeout(timeoutId);
+        console.error('[imageService] OpenRouter with Meta Muse failed with error:', error);
+        if (error instanceof Error && error.name === 'AbortError') {
+          console.error('[imageService] OpenRouter request timed out');
+        }
       }
     }
-  } else if (isChildrenBookIllustration && !process.env.OPENROUTER_API_KEY) {
-    console.warn('[imageService] No OpenRouter API key configured for children\'s book image');
   } else {
-    console.log('[imageService] Not a children\'s book, proceeding with normal backend prioritization');
+    console.log('[imageService] Not a children\'s book or not an illustration/cover, proceeding with normal backend prioritization');
   }
 
   // Primary: Stability AI
