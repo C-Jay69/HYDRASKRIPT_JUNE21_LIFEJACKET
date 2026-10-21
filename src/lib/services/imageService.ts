@@ -866,7 +866,10 @@ async function generateWithStability(prompt: string, size: ImageSize, options: G
 export async function generateImage(options: GenerateImageOptions): Promise<GeneratedImageResult> {
   const { prompt, style = 'pixar', size = '1024x1024', ownerId, bookId, assetType } = options;
   const styleConfig = STYLE_CONFIG[style] || STYLE_CONFIG.pixar;
-  const enhancedPrompt = `${prompt}, ${styleConfig.prompt}`;
+  // Style FIRST: image models weight the head of the prompt most heavily, so
+  // the style anchor leads and the scene description follows. (Previously the
+  // style was appended after the scene, which diluted e.g. the Pixar look.)
+  const enhancedPrompt = `${styleConfig.prompt}. ${prompt}`;
 
   console.log(`[imageService] generateImage called with: style=${style}, assetType=${assetType}, bookId=${bookId}`);
 
@@ -953,11 +956,12 @@ export async function generateBookCover(bookId: string, ownerId: string, bookTit
  * Generate a chapter illustration with character consistency support.
  */
 export async function generateChapterIllustration(bookId: string, ownerId: string, chapterIndex: number, illustrationPrompt: string, style: string = 'pixar', characterNames?: string[]): Promise<GeneratedImageResult> {
-  // Character Consistency Logic: If we have names, we append a consistency anchor to the prompt
+  // Character Consistency Logic: anchor recurring characters to a stable look
+  // so the cast doesn't redraw itself between chapters.
   let finalPrompt = illustrationPrompt;
   if (characterNames && characterNames.length > 0) {
     const hero = characterNames[0];
-    finalPrompt = `Character consistency: The main character is named ${hero}. ${illustrationPrompt}. Ensure ${hero} looks the same as in previous illustrations.`;
+    finalPrompt = `Series character consistency: the recurring main character is ${hero}. Keep ${hero}'s face, hairstyle, outfit and color palette identical to the other illustrations in this series. ${illustrationPrompt}`;
   }
 
   // For children's books, ensure we're generating full-color illustrations
