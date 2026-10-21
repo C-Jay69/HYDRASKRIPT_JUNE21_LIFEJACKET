@@ -66,6 +66,10 @@ export async function retryFailedChapter(
   // Reset the chapter to a clean pending state. The worker overwrites content
   // on success; clearing here prevents stale partial content from rendering
   // as if it were a valid draft while the retry is in flight.
+  //
+  // The illustration is cleared with it: leaving the previous attempt's artwork
+  // in place shows an image of the OLD text next to the NEW text, which is
+  // exactly the "the picture doesn't match the page" complaint.
   await db.chapter.update({
     where: { bookId_index: { bookId, index: chapterIndex } },
     data: {
@@ -74,6 +78,8 @@ export async function retryFailedChapter(
       content: '',
       wordCount: 0,
       summaryForNext: '',
+      illustrationUrl: null,
+      illustrationPrompt: '',
     },
   });
 
