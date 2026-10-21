@@ -1,5 +1,5 @@
 // HydraSkript - Image Generation Service (Hardened for Coloring Books)
-// Primary backend: Google Gemini 2.5 Flash Image. Fallback: Pollinations AI.
+// Fallback chain: Pollinations AI (default) → OpenRouter Images API → Stability AI.
 import { saveBase64File, generateFilename, createMediaAsset } from '@/lib/utils/storage';
 import { STYLE_CONFIG, COLORING_THEMES } from '@/types';
 import type { ColoringTheme, TargetAudience } from '@/types';
@@ -378,9 +378,9 @@ async function generateWithGemini(prompt: string, options: GenerateImageOptions)
 }
 
 /**
- * Backend 4: OpenRouter with Meta Muse model for Kids Books and Coloring Books.
- * Uses the OpenRouter API with the meta/muse-image model for improved image quality
- * specifically for children's books and coloring books.
+ * Backend: OpenRouter Images API (POST /api/v1/images).
+ * First backup when Pollinations fails. Returns base64 in data[0].b64_json.
+ * Model is env-tunable via OPENROUTER_IMAGE_MODEL.
  */
 async function generateWithOpenRouter(prompt: string, options: GenerateImageOptions): Promise<GeneratedImageResult> {
   try {
@@ -390,29 +390,31 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
       return { success: false, error: 'No OpenRouter API key configured' };
     }
 
-    console.log('[imageService] Attempting OpenRouter with Meta Muse model for children\'s book');
+    const model = process.env.OPENROUTER_IMAGE_MODEL || 'bytedance-seed/seedream-4.5';
+    console.log(`[imageService] Attempting OpenRouter /api/v1/images with model ${model}`);
 
     const maxRetries = 3;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         console.log(`[imageService] OpenRouter attempt ${attempt}`);
 
-        // Add timeout to prevent hanging - increased to 30 seconds for better reliability
+        // Add timeout to prevent hanging - 60 seconds for image generation
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+        const timeoutId = setTimeout(() => controller.abort(), 60000);
 
-        const response = await fetch('https://openrouter.ai/api/v1/images/generate', {
+        const response = await fetch('https://openrouter.ai/api/v1/images', {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${apiKey}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            model: 'meta/muse-image:4.0', // Use Meta Muse specifically for kids and coloring books
-            prompt: prompt,
-            width: 1024,
-            height: 1024,
+            model,
+            prompt,
+            size: options.size || '1024x1024',
+            output_format: 'png',
             n: 1,
+            seed: hashString(`${options.bookId ?? options.ownerId}:${options.assetType}`) % 2147483647,
           }),
           signal: controller.signal
         });
@@ -430,21 +432,32 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
         }
 
         const data = await response.json();
-        console.log('[imageService] OpenRouter response received:', data);
 
-        // Handle different response formats
+        // Current Images API shape: data[0].b64_json (+ optional media_type).
+        // Legacy shapes kept as fallback for older proxies.
         let base64Data: string | undefined;
         let mimeType: string = 'image/png';
-
-        if (data.data && Array.isArray(data.data) && data.data[0]) {
-          // New format: data array with base64 image
-          base64Data = data.data[0].base64;
+        const first = Array.isArray(data.data) ? data.data[0] : undefined;
+        if (first?.b64_json) {
+          base64Data = first.b64_json;
+          if (first.media_type) mimeType = first.media_type;
+        } else if (first?.base64) {
+          base64Data = first.base64;
         } else if (data.image) {
-          // Old format: direct image property
           base64Data = data.image;
-        } else if (data.images && Array.isArray(data.images) && data.images[0]) {
-          // Alternative format: images array
-          base64Data = data.images[0];
+        } else if (Array.isArray(data.images) && data.images[0]) {
+          const img = data.images[0];
+          base64Data = typeof img === 'string' ? img : img?.image_url?.url;
+        }
+
+        // Tolerate data-URI payloads (e.g. chat-style image_url.url responses).
+        if (base64Data?.startsWith('data:')) {
+          const comma = base64Data.indexOf(',');
+          if (comma > 0) {
+            const header = base64Data.slice(5, comma).split(';')[0];
+            if (header.includes('/')) mimeType = header;
+            base64Data = base64Data.slice(comma + 1);
+          }
         }
 
         if (!base64Data) {
@@ -528,6 +541,12 @@ async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Respons
 async function generateWithPollinations(prompt: string, size: ImageSize, options: GenerateImageOptions): Promise<GeneratedImageResult> {
   // Pollinations uses URL-encoded prompts
   const encodedPrompt = encodeURIComponent(prompt);
+  // Only coloring pages / line-art styles get the line-art extraction +
+  // coloring-page quality gate below. Full-color assets (children's book
+  // illustrations, covers) must skip both: the extractor would strip the
+  // color, and the "colorable page" density gate rejects virtually every
+  // full-color image — silently producing text-only books.
+  const needsLineArt = options.assetType === 'coloring_page' || LINE_ART_STYLES.has(options.style || '');
   const { width, height } = pollinationsSize(size);
   const model = process.env.POLLINATIONS_MODEL || 'flux';
   // Pollinations ignores "no color" instructions in the positive prompt, so pass
@@ -578,17 +597,22 @@ async function generateWithPollinations(prompt: string, size: ImageSize, options
 
       const base64 = buffer.toString('base64');
 
-      // Convert to line art (or keep if already clean) and verify the result
-      // actually looks like a coloring page before persisting — on both
-      // branches. Anything faint, blank or banded needs a fresh seed.
-      const converted = await toLineArtBase64(base64, contentType);
-      const finalBase64 = converted ? converted.base64 : base64;
-      const finalMime = converted ? converted.mimeType : contentType;
-      if (!(await isLineArtUsable(Buffer.from(finalBase64, 'base64')))) {
-        lastError = `Pollinations image failed the quality gate (attempt ${attempt}/${maxRetries})`;
-        console.warn(`[imageService] ${lastError}; retrying with a new seed...`);
-        await new Promise((resolve) => setTimeout(resolve, 800));
-        continue;
+      // Coloring pages: convert to line art (or keep if already clean) and
+      // verify the result actually looks like a coloring page before
+      // persisting. Anything faint, blank or banded needs a fresh seed.
+      // Full-color illustrations/covers persist untouched.
+      let finalBase64 = base64;
+      let finalMime = contentType;
+      if (needsLineArt) {
+        const converted = await toLineArtBase64(base64, contentType);
+        finalBase64 = converted ? converted.base64 : base64;
+        finalMime = converted ? converted.mimeType : contentType;
+        if (!(await isLineArtUsable(Buffer.from(finalBase64, 'base64')))) {
+          lastError = `Pollinations image failed the quality gate (attempt ${attempt}/${maxRetries})`;
+          console.warn(`[imageService] ${lastError}; retrying with a new seed...`);
+          await new Promise((resolve) => setTimeout(resolve, 800));
+          continue;
+        }
       }
       return persistAsset({
         base64: finalBase64,
@@ -880,18 +904,6 @@ export async function generateImage(options: GenerateImageOptions): Promise<Gene
       console.error('[imageService] Stability image generation failed:', stabilityResult.error);
     } catch (error) {
       console.error('[imageService] Stability image generation failed with error:', error);
-    }
-  }
-
-  // Third Backup: Pruna AI (P-Image) — funded, cheap, ~1s/image.
-  if (process.env.PRUNA_AI_API_KEY) {
-    console.log('[imageService] Trying Pruna AI as third backup');
-    try {
-      const prunaResult = await generateWithPruna(enhancedPrompt, size, { ...options, prompt: enhancedPrompt });
-      if (prunaResult.success) return prunaResult;
-      console.error('[imageService] Pruna image generation failed:', prunaResult.error);
-    } catch (error) {
-      console.error('[imageService] Pruna image generation failed with error:', error);
     }
   }
 
