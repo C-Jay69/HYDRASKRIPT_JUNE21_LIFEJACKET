@@ -836,8 +836,8 @@ async function generateWithStability(prompt: string, size: ImageSize, options: G
 }
 
 /**
- * Generate an image using available backends (Stability primary, Gemini & Pollinations fallback)
- * For kids books and coloring books, uses OpenRouter with Meta Muse model for better results
+ * Generate an image using available backends with prioritized fallbacks
+ * For kids books and coloring books, prioritizes OpenRouter -> Pruna -> Pollinations
  */
 export async function generateImage(options: GenerateImageOptions): Promise<GeneratedImageResult> {
   const { prompt, style = 'pixar', size = '1024x1024', ownerId, bookId, assetType } = options;
@@ -846,22 +846,19 @@ export async function generateImage(options: GenerateImageOptions): Promise<Gene
 
   console.log(`[imageService] generateImage called with: style=${style}, assetType=${assetType}, bookId=${bookId}`);
 
-  // For children's book illustrations and covers, try OpenRouter with Meta Muse first
-  // This ensures children's books use the Meta Muse model for better results
+  // For children's book illustrations and covers, prioritize OpenRouter -> Pruna -> Pollinations
   const isChildrenBookIllustration = bookId && (assetType === 'illustration' || assetType === 'cover');
   console.log(`[imageService] isChildrenBookIllustration: ${isChildrenBookIllustration}`);
   console.log(`[imageService] Process.env.OPENROUTER_API_KEY: ${process.env.OPENROUTER_API_KEY ? 'SET' : 'NOT SET'}`);
   console.log(`[imageService] Process.env.OPEN_ROUTER_API_KEY: ${process.env.OPEN_ROUTER_API_KEY ? 'SET' : 'NOT SET'}`);
 
-  // Try OpenRouter with Meta Muse for children's books first
+  // Primary: OpenRouter with Meta Muse model for children's books
   if (isChildrenBookIllustration) {
     console.log('[imageService] Attempting OpenRouter for children\'s book image');
 
     // Check for OpenRouter API key
     const openRouterApiKey = process.env.OPENROUTER_API_KEY || process.env.OPEN_ROUTER_API_KEY;
-    if (!openRouterApiKey) {
-      console.warn('[imageService] No OpenRouter API key configured for children\'s book image');
-    } else {
+    if (openRouterApiKey) {
       console.log('[imageService] Attempting OpenRouter with Meta Muse model for children\'s book');
 
       // Add timeout to prevent hanging - increased to 30 seconds for better reliability
@@ -885,20 +882,34 @@ export async function generateImage(options: GenerateImageOptions): Promise<Gene
           console.error('[imageService] OpenRouter request timed out');
         }
       }
+    } else {
+      console.warn('[imageService] No OpenRouter API key configured for children\'s book image');
     }
   } else {
     console.log('[imageService] Not a children\'s book or not an illustration/cover, proceeding with normal backend prioritization');
   }
 
-  // Primary: Stability AI
-  if (process.env.STABILITY_AI_API_KEY) {
-    console.log('[imageService] Trying Stability AI as primary backend');
-    try {
-      const stabilityResult = await generateWithStability(enhancedPrompt, size, { ...options, prompt: enhancedPrompt });
-      if (stabilityResult.success) return stabilityResult;
-      console.error('[imageService] Stability image generation failed:', stabilityResult.error);
-    } catch (error) {
-      console.error('[imageService] Stability image generation failed with error:', error);
+  // Primary: OpenRouter (children's books) or Stability AI (general)
+  const openRouterApiKey = process.env.OPENROUTER_API_KEY || process.env.OPEN_ROUTER_API_KEY;
+  if (openRouterApiKey || process.env.STABILITY_AI_API_KEY) {
+    if (openRouterApiKey) {
+      console.log('[imageService] Trying OpenRouter as primary backend');
+      try {
+        const openRouterResult = await generateWithOpenRouter(enhancedPrompt, { ...options, prompt: enhancedPrompt });
+        if (openRouterResult.success) return openRouterResult;
+        console.error('[imageService] OpenRouter image generation failed:', openRouterResult.error);
+      } catch (error) {
+        console.error('[imageService] OpenRouter image generation failed with error:', error);
+      }
+    } else if (process.env.STABILITY_AI_API_KEY) {
+      console.log('[imageService] Trying Stability AI as primary backend');
+      try {
+        const stabilityResult = await generateWithStability(enhancedPrompt, size, { ...options, prompt: enhancedPrompt });
+        if (stabilityResult.success) return stabilityResult;
+        console.error('[imageService] Stability image generation failed:', stabilityResult.error);
+      } catch (error) {
+        console.error('[imageService] Stability image generation failed with error:', error);
+      }
     }
   }
 
