@@ -1,345 +1,352 @@
 // HydraSkript - Image Generation Service (Hardened for Coloring Books)
-  // Primary backend: Google Gemini 2.5 Flash Image. Fallback: Pollinations AI.
-  import { saveBase64File, generateFilename, createMediaAsset } from '@/lib/utils/storage';
-  import { STYLE_CONFIG, COLORING_THEMES } from '@/types';
-  import type { ColoringTheme, TargetAudience } from '@/types';
+// Primary backend: Google Gemini 2.5 Flash Image. Fallback: Pollinations AI.
+import { saveBase64File, generateFilename, createMediaAsset } from '@/lib/utils/storage';
+import { STYLE_CONFIG, COLORING_THEMES } from '@/types';
+import type { ColoringTheme, TargetAudience } from '@/types';
 
-  type ImageSize = '1024x1024' | '768x1344' | '864x1152' | '1344x768' | '1152x864' | '1440x720' | '720x1440';
+type ImageSize = '1024x1024' | '768x1344' | '864x1152' | '1344x768' | '1152x864' | '1440x720' | '720x1440';
 
-  export interface GenerateImageOptions {
-    prompt: string;
-    style?: string;
-    size?: ImageSize;
-    ownerId: string;
-    bookId?: string;
-    assetType: string;
+export interface GenerateImageOptions {
+  prompt: string;
+  style?: string;
+  size?: ImageSize;
+  ownerId: string;
+  bookId?: string;
+  assetType: string;
+}
+
+export interface GeneratedImageResult {
+  success: boolean;
+  publicUrl?: string;
+  assetId?: string;
+  error?: string;
+}
+
+const LINE_ART_STYLES = new Set(['lineart', 'lineart-adult']);
+
+/**
+ * Detect a degenerate generation: a flat, near-contentless image (a uniform gray
+ * or blank wash). Pollinations periodically returns these for line-art prompts,
+ * and no amount of post-processing can pull colorable contours out of them, so
+ * they must be rejected and regenerated with a different seed.
+ */
+async function isDegenerateImage(buffer: Buffer): Promise<boolean> {
+  try {
+    const sharp = (await import('sharp')).default;
+    const stats = await sharp(buffer).stats();
+    // A flat gray/white/black wash has almost no tonal variation (stdev ~0-30),
+    // while a drawing — even a faint sketch — spans a wide tonal range. Real
+    // line-art input measures ~40+ stdev, so anything flatter than 32 is a
+    // contentless box that no post-processing can turn into a coloring page.
+    return stats.channels[0].stdev < 32;
+  } catch {
+    return true;
   }
+}
 
-  export interface GeneratedImageResult {
-    success: boolean;
-    publicUrl?: string;
-    assetId?: string;
-    error?: string;
+/**
+ * Post-conversion gate: a usable coloring page has a healthy line density
+ * (about 0.8-12% black, matching real coloring-book page coverage) over a
+ * mostly-white page. Below that it reads as blank; above it as a blob. Also
+ * rejects pages with solid black bands (e.g. a Pollinations caption strip or a
+ * baked-in shadow bar), which padding with ink cannot fix.
+ */
+async function isLineArtUsable(pngBuffer: Buffer): Promise<boolean> {
+  try {
+    const sharp = (await import('sharp')).default;
+    const meta = await sharp(pngBuffer).metadata();
+    const gray = await sharp(pngBuffer).flatten({ background: '#fff' }).grayscale().raw().toBuffer();
+    const { width: W, height: H } = meta;
+    let black = 0;
+    let white = 0;
+    for (const v of gray) {
+      if (v < 40) black++;
+      else if (v >= 230) white++;
+    }
+    const blackFraction = black / gray.length;
+    const whiteFraction = white / gray.length;
+    if (blackFraction < 0.008 || blackFraction > 0.12 || whiteFraction < 0.7) {
+      console.warn(`[gate-debug] density reject: black=${(blackFraction * 100).toFixed(1)}% white=${(whiteFraction * 100).toFixed(1)}%`);
+      return false;
+    }
+
+    // Median horizontal stroke width. The reader renders a 1024px page at about
+    // half size, so 1px hairlines wash out to nothing and the page reads as a
+    // blank sheet. A usable page keeps its median stroke at 2px or more.
+    const widths: number[] = [];
+    for (let y = 0; y < H; y++) {
+      let run = 0;
+      for (let x = 0; x <= W; x++) {
+        const black = x < W && gray[y * W + x] < 128;
+        if (black) {
+          run++;
+        } else if (run > 0) {
+          widths.push(run);
+          run = 0;
+        }
+      }
+    }
+    if (widths.length < 50) {
+      console.warn(`[gate-debug] too-few-strokes reject: ${widths.length}`);
+      return false;
+    }
+    widths.sort((a, b) => a - b);
+    const medianWidth = widths[Math.floor(widths.length / 2)];
+    if (medianWidth < 2) {
+      console.warn(`[gate-debug] hairline reject: median stroke ${medianWidth}px`);
+      return false;
+    }
+
+    let run = 0;
+    for (let y = 0; y < H; y++) {
+      let rowBlack = 0;
+      for (let x = 0; x < W; x++) {
+        if (gray[y * W + x] < 40) rowBlack++;
+      }
+      if (rowBlack / W > 0.55) {
+        run++;
+        if (run > Math.max(4, H * 0.02)) { console.warn(`[gate-debug] row-band reject: ${run} rows at row=${y}`); return false; }
+      } else {
+        run = 0;
+      }
+    }
+
+    // Full-height solid strips (the vertical frame edge Pollinations often
+    // bakes into the image). Two adjacent columns that are >80% dark for the
+    // entire height is a border, not a drawing.
+    run = 0;
+    for (let x = 0; x < W; x++) {
+      let colBlack = 0;
+      for (let y = 0; y < H; y++) {
+        if (gray[y * W + x] < 40) colBlack++;
+      }
+      if (colBlack / H > 0.8) {
+        run++;
+        if (run >= 2) { console.warn(`[gate-debug] col-strip reject: ${run} cols at x=${x}`); return false; }
+      } else {
+        run = 0;
+      }
+    }
+    return true;
+  } catch {
+    return false;
   }
+}
 
-  const LINE_ART_STYLES = new Set(['lineart', 'lineart-adult']);
+/**
+ * Find the gray value at which the darkest `fraction` of pixels sit. Keeps line
+ * strokes at a healthy, visible thickness instead of the hairline edges that a
+ * pure edge detector leaves behind on faint Pollinations sketches.
+ */
+function percentileThreshold(grayRaw: Buffer, fraction: number): number {
+  const hist = new Float64Array(256);
+  for (const v of grayRaw) hist[v]++;
+  let target = Math.floor(grayRaw.length * fraction);
+  let acc = 0;
+  for (let v = 0; v < 256; v++) {
+    acc += hist[v];
+    if (acc >= target) return v;
+  }
+  return 255;
+}
 
-  /**
-   * Detect a degenerate generation: a flat, near-contentless image (a uniform gray
-   * or blank wash). Pollinations periodically returns these for line-art prompts,
-   * and no amount of post-processing can pull colorable contours out of them, so
-   * they must be rejected and regenerated with a different seed.
-   */
-  async function isDegenerateImage(buffer: Buffer): Promise<boolean> {
-    try {
-      const sharp = (await import('sharp')).default;
-      const stats = await sharp(buffer).stats();
-      // A flat gray/white/black wash has almost no tonal variation (stdev ~0-30),
-      // while a drawing — even a faint sketch — spans a wide tonal range. Real
-      // line-art input measures ~40+ stdev, so anything flatter than 32 is a
-      // contentless box that no post-processing can turn into a coloring page.
-      return stats.channels[0].stdev < 32;
-    } catch {
-      return true;
+/**
+ * Fraction of mid-tone pixels (not near-black, not near-white) that do NOT sit
+ * near any black ink. Real line art: mid pixels are anti-aliasing along dark
+ * contours, so they always touch black. A shaded grayscale illustration: mid
+ * pixels form broad regions far from any line. This is what tells the two
+ * apart — RGB channel spread can't, because every grayscale image scores ~0.
+ * Buckets pixels into 4x4 blocks and checks a 3x3 block neighborhood.
+ */
+function shadedMidFraction(grayRaw: Buffer, width: number, height: number): number {
+  const bw = Math.ceil(width / 4);
+  const bh = Math.ceil(height / 4);
+  const dark = new Uint8Array(bw * bh);
+  for (let y = 0; y < height; y++) {
+    const off = y * width;
+    for (let x = 0; x < width; x++) {
+      if (grayRaw[off + x] < 40) dark[(y >> 2) * bw + (x >> 2)] = 1;
     }
   }
-
-  /**
-   * Post-conversion gate: a usable coloring page has a healthy line density
-   * (about 0.8-12% black, matching real coloring-book page coverage) over a
-   * mostly-white page. Below that it reads as blank; above it as a blob. Also
-   * rejects pages with solid black bands (e.g. a Pollinations caption strip or a
-   * baked-in shadow bar), which padding with ink cannot fix.
-   */
-  async function isLineArtUsable(pngBuffer: Buffer): Promise<boolean> {
-    try {
-      const sharp = (await import('sharp')).default;
-      const meta = await sharp(pngBuffer).metadata();
-      const gray = await sharp(pngBuffer).flatten({ background: '#fff' }).grayscale().raw().toBuffer();
-      const { width: W, height: H } = meta;
-      let black = 0;
-      let white = 0;
-      for (const v of gray) {
-        if (v < 40) black++;
-        else if (v >= 230) white++;
+  let mid = 0;
+  let midFar = 0;
+  for (let y = 0; y < height; y++) {
+    const off = y * width;
+    const by = y >> 2;
+    for (let x = 0; x < width; x++) {
+      const v = grayRaw[off + x];
+      if (v < 40 || v >= 230) continue;
+      mid++;
+      const bx = x >> 2;
+      let near = 0;
+      for (let dy = -1; dy <= 1 && !near; dy++) {
+        const yy = by + dy;
+        if (yy < 0 || yy >= bh) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const xx = bx + dx;
+          if (xx >= 0 && xx < bw && dark[yy * bw + xx]) { near = 1; break; }
+        }
       }
-      const blackFraction = black / gray.length;
-      const whiteFraction = white / gray.length;
-      if (blackFraction < 0.008 || blackFraction > 0.12 || whiteFraction < 0.7) {
-        console.warn(`[gate-debug] density reject: black=${(blackFraction * 100).toFixed(1)}% white=${(whiteFraction * 100).toFixed(1)}%`);
-        return false;
+      if (!near) midFar++;
+    }
+  }
+  return mid > 0 ? midFar / mid : 0;
+}
+
+/**
+ * Convert a colored OR shaded-grayscale image into clean black-and-white line art.
+ *
+ * The image backends are asked for "black and white line art", but they often
+ * return a *shaded* picture instead — full color from Pollinations, or a
+ * grayscale illustration with gradients/shadows from a model that half-followed
+ * the prompt. Neither is colorable. Two things were wrong before:
+ *   1. The old guard skipped any image whose RGB channel means were close
+ *      (i.e. grayscale), so a shaded grayscale image was stored untouched — the
+ *      exact "black and white but not colorable" complaint.
+ *   2. A plain threshold turns every shaded region into a solid black blob.
+ *
+ * Instead we run a Difference of Gaussians: the local mean minus the image keeps
+ * thin dark contours while cancelling large-scale shading, so shadows do not
+ * fill in. We then thicken the hairlines so there is room to color between them.
+ *
+ * Returns null only when the image already looks like clean line art (light and
+ * near-grayscale), so good output from a capable backend is left untouched.
+ */
+async function toLineArtBase64(base64: string, mimeType: string): Promise<{ base64: string; mimeType: string } | null> {
+  try {
+    const sharp = (await import('sharp')).default;
+    const input = Buffer.from(base64, 'base64');
+
+    const stats = await sharp(input).stats();
+    const means = stats.channels.slice(0, 3).map((c) => c.mean);
+    const spread = Math.max(...means) - Math.min(...means);
+
+    // Distinguish genuine line art from a shaded or faint illustration. Both can
+    // be near-grayscale and light, so luminance alone is not enough: only real
+    // line art already has a healthy amount of solid black (the contours) next
+    // to a mostly-white page. A faint wash has almost no true black; a shaded
+    // picture has too much ink. Re-running the extractor on good line art fills
+    // it into a black blob, so this skip matters.
+    const grayRaw = await sharp(input).grayscale().raw().toBuffer();
+    const meta = await sharp(input).metadata();
+    let black = 0;
+    let white = 0;
+    for (const v of grayRaw) {
+      if (v < 40) black++;
+      else if (v >= 230) white++;
+    }
+    const blackFraction = black / grayRaw.length;
+    const whiteFraction = white / grayRaw.length;
+    const midFar = meta.width && meta.height ? shadedMidFraction(grayRaw, meta.width, meta.height) : 1;
+    const alreadyLineArt = Number.isFinite(spread) && spread <= 10
+      && blackFraction >= 0.008 && blackFraction <= 0.2 && whiteFraction >= 0.6
+      && midFar <= 0.45;
+    if (alreadyLineArt) return null;
+
+    const gray = await sharp(input).grayscale().png().toBuffer();
+    const localMean = await sharp(gray).blur(6).png().toBuffer();
+    const dog = await sharp(localMean)
+      .composite([{ input: gray, blend: 'difference' }])
+      .png()
+      .toBuffer();
+    const edges = await sharp(dog).linear(6, 0).threshold(30).png().toBuffer();
+
+    let union: Buffer;
+    if (blackFraction >= 0.015) {
+      // Darker illustration with real ink: keep only contours so fills, shadows
+      // and baked-in black bands never turn into solid blobs.
+      union = edges;
+    } else {
+      // Faint/mid sketch: keep the darkest ~4% as thick visible strokes, then
+      // union with the contours so interior detail survives.
+      const t = percentileThreshold(grayRaw, 0.04);
+      const ink = await sharp(gray).threshold(t).negate().png().toBuffer();
+      union = await sharp(edges).composite([{ input: ink, blend: 'lighten' }]).png().toBuffer();
+    }
+
+    // Thicken the contours so there is room to color between them. Every step
+    // above must stay lossless PNG: sharp re-encodes intermediates in the input
+    // file's format by default, and JPEG ringing smears thresholded binary
+    // output back into gray mush. The blur radius also sets stroke width, which
+    // has to survive the reader downscaling a 1024px page to roughly half size.
+    const thickened = await sharp(union).blur(1.8).threshold(55).png().toBuffer();
+    const lineArt = await sharp(thickened).negate().png().toBuffer();
+
+    return { base64: lineArt.toString('base64'), mimeType: 'image/png' };
+  } catch (error) {
+    console.error('[imageService] Line-art post-processing failed (non-fatal):', error instanceof Error ? error.message : String(error));
+    return null;
+  }
+}
+
+/**
+ * Persist a generated base64 image and register a media asset.
+ */
+async function persistAsset(params: {
+  base64: string;
+  mimeType: string;
+  assetType: string;
+  style: string;
+  ownerId: string;
+  bookId?: string;
+  prompt: string;
+}): Promise<GeneratedImageResult> {
+  try {
+    const { assetType, style, ownerId, bookId, prompt } = params;
+    let { base64, mimeType } = params;
+
+    // Guarantee line art for coloring pages / lineart styles.
+    if (assetType === 'coloring_page' || LINE_ART_STYLES.has(style)) {
+      const converted = await toLineArtBase64(base64, mimeType);
+      if (converted) {
+        base64 = converted.base64;
+        mimeType = converted.mimeType;
       }
+    }
 
-      // Median horizontal stroke width. The reader renders a 1024px page at about
-      // half size, so 1px hairlines wash out to nothing and the page reads as a
-      // blank sheet. A usable page keeps its median stroke at 2px or more.
-         const widths: number[] = [];
-         for (let y = 0; y < H; y++) {
-           let run = 0;
-           for (let x = 0; x <= W; x++) {
-             const black = x < W && gray[y * W + x] < 128;
-             if (black) {
-               run++;
-             } else if (run > 0) {
-               widths.push(run);
-               run = 0;
-             }
-           }
-         }
-         if (widths.length < 50) {
-           console.warn(`[gate-debug] too-few-strokes reject: ${widths.length}`);
-           return false;
-         }
-         widths.sort((a, b) => a - b);
-         const medianWidth = widths[Math.floor(widths.length / 2)];
-         if (medianWidth < 2) {
-           console.warn(`[gate-debug] hairline reject: median stroke ${medianWidth}px`);
-           return false;
-         }
+    const ext = mimeType.includes('png') ? 'png' : mimeType.includes('jpeg') || mimeType.includes('jpg') ? 'jpg' : 'png';
+    const filename = generateFilename(`${assetType}_${style}`, ext);
+    const publicUrl = await saveBase64File(
+      assetType === 'cover' ? 'covers' : 'illustrations',
+      filename,
+      base64,
+      { contentType: mimeType || 'image/png' }
+    );
+    const asset = await createMediaAsset({
+      ownerId,
+      bookId,
+      assetType,
+      storagePath: publicUrl,
+      publicUrl,
+      metadata: { style, prompt },
+    });
+    return { success: true, publicUrl, assetId: asset.id };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
 
-         let run = 0;
-         for (let y = 0; y < H; y++) {
-           let rowBlack = 0;
-           for (let x = 0; x < W; x++) {
-             if (gray[y * W + x] < 40) rowBlack++;
-           }
-           if (rowBlack / W > 0.55) {
-             run++;
-             if (run > Math.max(4, H * 0.02)) { console.warn(`[gate-debug] row-band reject: ${run} rows at row=${y}`); return false; }
-           } else {
-             run = 0;
-           }
-         }
+/**
+ * Backend 1: Google Gemini 2.5 Flash Image.
+ * Returns base64 inside candidates[].content.parts[].inlineData.
+ * Now with retry logic for quota limits (429 Too Many Requests).
+ */
+async function generateWithGemini(prompt: string, options: GenerateImageOptions): Promise<GeneratedImageResult> {
+  try {
+    const { GoogleGenerativeAI } = await import('@google/generative-ai');
+    const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY as string);
+    const modelName = process.env.GEMINI_IMAGE_MODEL || 'gemini-3.1-flash-image';
+    const model = genAI.getGenerativeModel({ model: modelName });
 
-         // Full-height solid strips (the vertical frame edge Pollinations often
-         // bakes into the image). Two adjacent columns that are >80% dark for the
-         // entire height is a border, not a drawing.
-         run = 0;
-         for (let x = 0; x < W; x++) {
-           let colBlack = 0;
-           for (let y = 0; y < H; y++) {
-             if (gray[y * W + x] < 40) colBlack++;
-           }
-           if (colBlack / H > 0.8) {
-             run++;
-             if (run >= 2) { console.warn(`[gate-debug] col-strip reject: ${run} cols at x=${x}`); return false; }
-           } else {
-             run = 0;
-           }
-         }
-         return true;
-       } catch {
-         return false;
-       }
-     }
-
-     /**
-      * Find the gray value at which the darkest `fraction` of pixels sit. Keeps line
-      * strokes at a healthy, visible thickness instead of the hairline edges that a
-      * pure edge detector leaves behind on faint Pollinations sketches.
-      */
-     function percentileThreshold(grayRaw: Buffer, fraction: number): number {
-       const hist = new Float64Array(256);
-       for (const v of grayRaw) hist[v]++;
-       let target = Math.floor(grayRaw.length * fraction);
-       let acc = 0;
-       for (let v = 0; v < 256; v++) {
-         acc += hist[v];
-         if (acc >= target) return v;
-       }
-       return 255;
-     }
-
-     /**
-      * Fraction of mid-tone pixels (not near-black, not near-white) that do NOT sit
-      * near any black ink. Real line art: mid pixels are anti-aliasing along dark
-      * contours, so they always touch black. A shaded grayscale illustration: mid
-      * pixels form broad regions far from any line. This is what tells the two
-      * apart — RGB channel spread can't, because every grayscale image scores ~0.
-      * Buckets pixels into 4x4 blocks and checks a 3x3 block neighborhood.
-      */
-     function shadedMidFraction(grayRaw: Buffer, width: number, height: number): number {
-       const bw = Math.ceil(width / 4);
-       const bh = Math.ceil(height / 4);
-       const dark = new Uint8Array(bw * bh);
-       for (let y = 0; y < height; y++) {
-         const off = y * width;
-         for (let x = 0; x < width; x++) {
-           if (grayRaw[off + x] < 4
-         }
-       }
-       let mid = 0;
-       let midFar = 0;
-       for (let y = 0; y < height; y++) {
-         const off = y * width;
-         const by = y >> 2;
-         for (let x = 0; x < width; x++) {
-           const v = grayRaw[off + x];
-           if (v < 40 || v >= 230) continue;
-           mid++;
-           const bx = x >> 2;
-           let near = 0;
-           for (let dy = -1; dy <= 1 && !near; dy++) {
-             const yy = by + dy;
-             if (yy < 0 || yy >= bh) continue;
-             for (let dx = -1; dx <= 1; dx++) {
-               const xx = bx + dx;
-               if (xx >= 0 && xx < bw && dark[yy * bw + xx]) { near = 1; break; }
-             }
-           }
-           if (!near) midFar++;
-         }
-       }
-       return mid > 0 ? midFar / mid : 0;
-     }
-
-     /**
-      * Convert a colored OR shaded-grayscale image into clean black-and-white line art.
-      *
-      * The image backends are asked for "black and white line art", but they often
-      * return a *shaded* picture instead — full color from Pollinations, or a
-      * grayscale illustration with gradients/shadows from a model that half-followed
-      * the prompt. Neither is colorable. Two things were wrong before:
-      *   1. The old guard skipped any image whose RGB channel means were close
-      *      (i.e. grayscale), so a shaded grayscale image was stored untouched — the
-      *      exact "black and white but not colorable" complaint.
-      *   2. A plain threshold turns every shaded region into a solid black blob.
-      *
-      * Instead we run a Difference of Gaussians: the local mean minus the image keeps
-      * thin dark contours while cancelling large-scale shading, so shadows do not
-      * fill in. We then thicken the hairlines so there is room to color between them.
-      *
-      * Returns null only when the image already looks like clean line art (light and
-      * near-grayscale), so good output from a capable backend is left untouched.
-      */
-     async function toLineArtBase64(base64: string, mimeType: string): Promise<{ base64: string; mimeType: string } | null> {
-       try {
-         const sharp = (await import('sharp')).default;
-         const input = Buffer.from(base64, 'base64');
-
-         const stats = await sharp(input).stats();
-         const means = stats.channels.slice(0, 3).map((c) => c.mean);
-         const spread = Math.max(...means) - Math.min(...means);
-
-         // Distinguish genuine line art from a shaded or faint illustration. Both can
-         // be near-grayscale and light, so luminance alone is not enough: only real
-         // line art already has a healthy amount of solid black (the contours) next
-         // to a mostly-white page. A faint wash has almost no true black; a shaded
-         // picture has too much ink. Re-running the extractor on good line art fills
-         // it into a black blob, so this skip matters.
-         const grayRaw = await sharp(input).grayscale().raw().toBuffer();
-         const meta = await sharp(input).metadata();
-         let black = 0;
-         let white = 0;
-         for (const v of grayRaw) {
-           if (v < 40) black++;
-           else if (v >= 230) white++;
-         }
-         const blackFraction = black / grayRaw.length;
-         const whiteFraction = white / grayRaw.length;
-         const midFar = meta.width && meta.height ? shadedMidFraction(grayRaw, meta.width, meta.height) : 1;
-         const alreadyLineArt = Number.isFinite(spread) && spread <= 10
-           && blackFraction >= 0.008 && blackFraction <= 0.2 && whiteFraction >= 0.6
-           && midFar <= 0.45;
-         if (alreadyLineArt) return null;
-
-         const gray = await sharp(input).grayscale().png().toBuffer();
-         const localMean = await sharp(gray).blur(6).png().toBuffer();
-         const dog = await sharp(lo
-           .composite([{ input: gray, blend: 'difference' }])
-           .png()
-           .toBuffer();
-         const edges = await sharp(dog).linear(6, 0).threshold(30).png().toBuffer();
-
-         let union: Buffer;
-         if (blackFraction >= 0.015) {
-           // Darker illustration with real ink: keep only contours so fills, shadows
-           // and baked-in black bands never turn into solid blobs.
-           union = edges;
-         } else {
-           // Faint/mid sketch: keep the darkest ~4% as thick visible strokes, then
-           // union with the contours so interior detail survives.
-           const t = percentileThreshold(grayRaw, 0.04);
-           const ink = await sharp(gray).threshold(t).negate().png().toBuffer();
-           union = await sharp(edges).composite([{ input: ink, blend: 'lighten' }]).png().toBuffer();
-         }
-
-         // Thicken the contours so there is room to color between them. Every step
-         // above must stay lossless PNG: sharp re-encodes intermediates in the input
-         // file's format by default, and JPEG ringing smears thresholded binary
-         // output back into gray mush. The blur radius also sets stroke width, which
-         // has to survive the reader downscaling a 1024px page to roughly half size.
-         const thickened = await sharp(union).blur(1.8).threshold(55).png().toBuffer();
-         const lineArt = await sharp(thickened).negate().png().toBuffer();
-
-         return { base64: lineArt.toString('base64'), mimeType: 'image/png' };
-       } catch (error) {
-         console.error('[imageService] Line-art post-processing failed (non-fatal):', error instanceof Error ? error.message : String(error));
-         return null;
-       }
-     }
-
-     /**
-      * Persist a generated base64 image and register a media asset.
-      */
-     async function persistAsset(params: {
-       base64: string;
-       mimeType: string;
-       assetType: string;
-       style: string;
-       ownerId: string;
-       bookId?: string;
-       prompt: string;
-     }): Promise<GeneratedImageResult> {
-       try {
-         const { assetType, style, ownerId, bookId, prompt } = params;
-         let { base64, mimeType } = params;
-
-         // Guarantee line art for coloring pages / lineart styles.
-         if (assetType === 'coloring_page' || LINE_ART_STYLES.has(style)) {
-           const converted = await toLineArtBase64(base64, mimeType);
-           if (converted) {
-             base64 = converted.base64;
-             mimeType = converted.mimeType;
-           }
-         }
-
-         const ext = mimeType.includes('png') ? 'png' : mimeType.includes('jpeg') || mimeType.includes('jpg') ? 'jpg' : 'png';
-         const filename = generateFilename(`${assetType}_${style}`, ext);
-         const publicUrl = await saveBase64File(
-           assetType === 'cover' ? 'covers' : 'illustrations',
-           filename,
-           base64,
-           { contentType: mimeType || 'image/png' }
-         );
-         const asset = await createMediaAsset({
-           ownerId,
-           bookId,
-           assetType,
-           storagePath: publicUrl,
-           publicUrl,
-           metadata: { style, prompt },
-         });
-         return { success: true, publicUrl, assetId: asset.id };
-       } catch (error) {
-         return { success: false, error: error instanceof Error ? error.message : String(error) };
-       }
-     }
-
-     /**
-      * Backend 1: Google Gemini 2.5 Flash Image.
-      * Returns base64 inside candidates[].content.parts[].inlineData.
-      * Now with retry logic for quota limits (429 Too Many Requests).
-      */
-     async function generateWithGemini(prompt: string, options: GenerateImageOptions): Promise<GeneratedImageResult> {
-       try {
-         const { GoogleGenerativeAI } = await import('@google/generative-ai');
-         const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY as string);
-         const modelName = process.env.GEMINI_IMAGE_MODEL || 'gemini-3.1-flash-image';
-         const model = genAI.getGenerativeModel({ model: modelName });
-
-         const maxRetries = 3;
-         for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const maxRetries = 3;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const result = await model.generateContent(prompt);
+        const parts: any[] = result.response?.candidates?.[0]?.content?.parts || [];
+        const imagePart: any = parts.find((p: any) => p.inlineData && p.inlineData.data);
+        if (!imagePart || !imagePart.inlineData) {
+          const text = parts.filter((p: any) => p.text).map((p: any) => p.text).join('');
+          return { success: false, error: `Gemini returned no image. ${text ? 'Text: ' + text.slice(0, 200) : ''}` };
         }
         const data: string = imagePart.inlineData.data;
         const mimeType: string = imagePart.inlineData.mimeType;
@@ -593,7 +600,8 @@ async function generateWithPollinations(prompt: string, size: ImageSize, options
       lastError = error instanceof Error ? error.message : String(error);
       if (attempt === maxRetries) {
         return { success: false, error: lastError };
-      }${attempt}/${maxRetries}):`, lastError);
+      }
+      console.warn(`[imageService] Pollinations failed (attempt ${attempt}/${maxRetries}):`, lastError);
       await new Promise(resolve => setTimeout(resolve, 1500 * attempt));
     }
   }
