@@ -463,8 +463,8 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
           bookId: options.bookId,
           prompt,
         });
-      } catch (error) {
-        if (error.name === 'AbortError') {
+      } catch (error: any) {
+        if (error && typeof error === 'object' && error.name === 'AbortError') {
           console.error('[imageService] OpenRouter request timed out');
           if (attempt === maxRetries) {
             return { success: false, error: 'OpenRouter request timed out' };
