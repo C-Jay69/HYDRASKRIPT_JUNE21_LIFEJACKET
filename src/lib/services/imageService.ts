@@ -396,6 +396,11 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         console.log(`[imageService] OpenRouter attempt ${attempt}`);
+
+        // Add timeout to prevent hanging
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout
+
         const response = await fetch('https://openrouter.ai/api/v1/images/generate', {
           method: 'POST',
           headers: {
@@ -409,7 +414,10 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
             height: 1024,
             n: 1,
           }),
+          signal: controller.signal
         });
+
+        clearTimeout(timeoutId);
 
         console.log(`[imageService] OpenRouter response status: ${response.status}`);
 
@@ -456,9 +464,16 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
           prompt,
         });
       } catch (error) {
-        console.error(`[imageService] OpenRouter attempt ${attempt} failed:`, error);
-        if (attempt === maxRetries) {
-          throw error;
+        if (error.name === 'AbortError') {
+          console.error('[imageService] OpenRouter request timed out');
+          if (attempt === maxRetries) {
+            return { success: false, error: 'OpenRouter request timed out' };
+          }
+        } else {
+          console.error(`[imageService] OpenRouter attempt ${attempt} failed:`, error);
+          if (attempt === maxRetries) {
+            throw error;
+          }
         }
         console.warn(`[imageService] OpenRouter failed (attempt ${attempt}/${maxRetries}):`, error instanceof Error ? error.message : String(error));
         await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
@@ -828,55 +843,106 @@ export async function generateImage(options: GenerateImageOptions): Promise<Gene
 
   console.log(`[imageService] generateImage called with: style=${style}, assetType=${assetType}, bookId=${bookId}`);
 
-  // For children's book illustrations and covers, always try OpenRouter with Meta Muse first
+  // For children's book illustrations and covers, try OpenRouter with Meta Muse first
   // This ensures children's books use the Meta Muse model for better results
   const isChildrenBookIllustration = bookId && (assetType === 'illustration' || assetType === 'cover');
   console.log(`[imageService] isChildrenBookIllustration: ${isChildrenBookIllustration}`);
 
-  // Always try OpenRouter with Meta Muse for children's books (prioritize it)
+  // Try OpenRouter with Meta Muse for children's books first
   if (isChildrenBookIllustration && process.env.OPENROUTER_API_KEY) {
     console.log('[imageService] Attempting OpenRouter for children\'s book image');
-    const openRouterResult = await generateWithOpenRouter(enhancedPrompt, { ...options, prompt: enhancedPrompt });
-    if (openRouterResult.success) {
-      console.log('[imageService] OpenRouter image generation successful');
-      return openRouterResult;
+
+    // Log that we're going to try OpenRouter for children's books
+    console.log('[imageService] Attempting OpenRouter with Meta Muse model for children\'s book');
+
+    // Add timeout to prevent hanging
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 20000); // 20 second timeout
+
+    try {
+      const openRouterResult = await generateWithOpenRouter(enhancedPrompt, { ...options, prompt: enhancedPrompt });
+      clearTimeout(timeoutId);
+
+      if (openRouterResult.success) {
+        console.log('[imageService] OpenRouter image generation successful');
+        return openRouterResult;
+      }
+      console.error('[imageService] OpenRouter with Meta Muse failed:', openRouterResult.error);
+      // Continue to other backends if OpenRouter fails
+    } catch (error) {
+      clearTimeout(timeoutId);
+      console.error('[imageService] OpenRouter with Meta Muse failed with error:', error);
+      if (error instanceof Error && error.name === 'AbortError') {
+        console.error('[imageService] OpenRouter request timed out');
+      }
     }
-    console.error('[imageService] OpenRouter with Meta Muse failed:', openRouterResult.error);
-    // Continue to other backends if OpenRouter fails
-  } else if (isChildrenBookIllustration) {
+  } else if (isChildrenBookIllustration && !process.env.OPENROUTER_API_KEY) {
     console.warn('[imageService] No OpenRouter API key configured for children\'s book image');
+  } else {
+    console.log('[imageService] Not a children\'s book, proceeding with normal backend prioritization');
   }
 
   // Primary: Stability AI
   if (process.env.STABILITY_AI_API_KEY) {
     console.log('[imageService] Trying Stability AI as primary backend');
-    const stabilityResult = await generateWithStability(enhancedPrompt, size, { ...options, prompt: enhancedPrompt });
-    if (stabilityResult.success) return stabilityResult;
-    console.error('[imageService] Stability image generation failed:', stabilityResult.error);
+    try {
+      const stabilityResult = await generateWithStability(enhancedPrompt, size, { ...options, prompt: enhancedPrompt });
+      if (stabilityResult.success) return stabilityResult;
+      console.error('[imageService] Stability image generation failed:', stabilityResult.error);
+    } catch (error) {
+      console.error('[imageService] Stability image generation failed with error:', error);
+    }
   }
 
   // Secondary: Pruna AI (P-Image) — funded, cheap, ~1s/image.
   if (process.env.PRUNA_AI_API_KEY) {
     console.log('[imageService] Trying Pruna AI as secondary backend');
-    const prunaResult = await generateWithPruna(enhancedPrompt, size, { ...options, prompt: enhancedPrompt });
-    if (prunaResult.success) return prunaResult;
-    console.error('[imageService] Pruna image generation failed:', prunaResult.error);
+    try {
+      const prunaResult = await generateWithPruna(enhancedPrompt, size, { ...options, prompt: enhancedPrompt });
+      if (prunaResult.success) return prunaResult;
+      console.error('[imageService] Pruna image generation failed:', prunaResult.error);
+    } catch (error) {
+      console.error('[imageService] Pruna image generation failed with error:', error);
+    }
   }
 
   // Tertiary: Gemini
   if (process.env.GOOGLE_AI_API_KEY) {
     console.log('[imageService] Trying Gemini as tertiary backend');
-    const geminiResult = await generateWithGemini(enhancedPrompt, { ...options, prompt: enhancedPrompt });
-    if (geminiResult.success) return geminiResult;
-    console.error('[imageService] Gemini image generation failed:', geminiResult.error);
+    try {
+      const geminiResult = await generateWithGemini(enhancedPrompt, { ...options, prompt: enhancedPrompt });
+      if (geminiResult.success) return geminiResult;
+      console.error('[imageService] Gemini image generation failed:', geminiResult.error);
+    } catch (error) {
+      console.error('[imageService] Gemini image generation failed with error:', error);
+    }
   }
 
   // Fallback: Pollinations
   console.log('[imageService] Falling back to Pollinations');
-  const pollinationsResult = await generateWithPollinations(enhancedPrompt, size, options);
-  if (pollinationsResult.success) return pollinationsResult;
-  console.error('[imageService] All backends failed:', pollinationsResult.error);
-  return { success: false, error: pollinationsResult.error || 'All image backends failed.' };
+  try {
+    const pollinationsResult = await generateWithPollinations(enhancedPrompt, size, options);
+    if (pollinationsResult.success) return pollinationsResult;
+    console.error('[imageService] All backends failed:', pollinationsResult.error);
+
+    // Special handling for balance issues
+    if (pollinationsResult.error && pollinationsResult.error.includes('insufficient balance')) {
+      console.warn('[imageService] Pollinations balance issue detected - suggesting alternative solutions');
+      return {
+        success: false,
+        error: 'Pollinations account has no balance (Insufficient balance). Top up at enter.pollinations.ai or fund another image backend. Alternatively, check if you have a working Stability AI or Pruna AI API key configured.'
+      };
+    }
+
+    return { success: false, error: pollinationsResult.error || 'All image backends failed.' };
+  } catch (error) {
+    console.error('[imageService] Pollinations fallback failed with error:', error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    if (errorMessage.includes('timeout')) {
+      return { success: false, error: 'Pollinations request timed out. Please try again or use a different image backend.' };
+    }
+    return { success: false, error: errorMessage || 'All image backends failed.' };
+  }
 }
 
 /**
