@@ -450,6 +450,8 @@ export async function generateChapter(bookId: string, ownerId: string, jobId: st
         const illustration = await generateChapterIllustration(bookId, ownerId, chapterIndex, simplifiedPrompt, 'pixar');
         if (illustration.success && illustration.publicUrl) {
           await db.chapter.update({ where: { id: chapter.id }, data: { illustrationUrl: illustration.publicUrl, illustrationPrompt: simplifiedPrompt } });
+        } else {
+          console.error(`[Illustration] Generation failed for chapter ${chapterIndex + 1} (book ${bookId}): ${illustration.error ?? 'no URL returned'}`);
         }
       } catch (e) {
         console.error('Illustration failed for children\'s book', e);
@@ -470,6 +472,8 @@ export async function generateChapter(bookId: string, ownerId: string, jobId: st
         const coloringPage = await generateColoringPage(bookId, ownerId, chapterIndex, coloringSubject, coloringTheme, targetAudience);
         if (coloringPage.success && coloringPage.publicUrl) {
           await db.chapter.update({ where: { id: chapter.id }, data: { illustrationUrl: coloringPage.publicUrl } });
+        } else {
+          console.error(`[ColoringPage] Generation failed for chapter ${chapterIndex + 1} (book ${bookId}): ${coloringPage.error ?? 'no URL returned'}`);
         }
       } catch (e) {
         console.error('Coloring page failed for children\'s book', e);
@@ -653,6 +657,8 @@ export async function finalizeBook(bookId: string, ownerId: string, jobId: strin
       const coverResult = await generateBookCover(bookId, ownerId, book.title, genre, targetAudience, coloringTheme);
       if (coverResult.success && coverResult.publicUrl) {
         await db.book.update({ where: { id: bookId }, data: { coverImageUrl: coverResult.publicUrl } });
+      } else {
+        console.error(`[Cover] Generation failed for book ${bookId}: ${coverResult.error ?? 'no URL returned'}`);
       }
     }
 
