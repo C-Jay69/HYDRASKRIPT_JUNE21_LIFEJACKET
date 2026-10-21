@@ -38,3 +38,6 @@ dev.log
 *.log
 .vercel
 .env*
+
+# preview script output (scripts/preview-storybook.ts)
+storybook-preview.pdf

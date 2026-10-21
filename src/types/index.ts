@@ -167,7 +167,9 @@ export const COLORING_THEMES: Record<ColoringTheme, { label: string; description
 
 export const STYLE_CONFIG: Record<string, { prompt: string; size: string }> = {
   pixar: {
-    prompt: 'Modern Pixar 3D style, vibrant colors, expressive characters, soft lighting, cinematic composition',
+    // Lead style anchor — generateImage places this FIRST in the prompt so the
+    // image model anchors on the style before reading the scene description.
+    prompt: 'A single frame from a modern Pixar-style 3D animated movie, high-end stylized 3D animation, expressive appealing characters with big friendly eyes, vibrant saturated colors, soft cinematic lighting, cinematic composition, beautifully detailed render',
     size: '1344x768',
   },
   lineart: {

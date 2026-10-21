@@ -64,6 +64,65 @@ function cleanChapterText(raw: string, chapterTitle: string): string {
 }
 
 /**
+ * Build an illustration brief from the ACTUAL generated chapter prose (not the
+ * pre-written outline synopsis) so the artwork depicts what the page says.
+ *
+ * A cheap, low-token LLM call picks the single most visual moment of the
+ * chapter and describes it the way an illustrator needs: who is in the scene
+ * (with their look), what they are doing, and where. If the LLM call fails or
+ * times out we fall back to the chapter's opening beats so illustration
+ * generation never blocks the pipeline.
+ */
+async function buildIllustrationBrief(
+  content: string,
+  chapterTitle: string,
+  targetAudience: string
+): Promise<string> {
+  const excerpt = content.length > 2800 ? content.slice(0, 2800) : content;
+  const ageLine =
+    targetAudience === '0-5'
+      ? 'Keep the scene very simple: one clear action, one setting, minimal props.'
+      : 'Keep the scene focused: one clear focal moment.';
+
+  const systemPrompt = `You are the art-brief writer for a children's picture book. Given a finished chapter, pick the single most important, most visual moment and describe it as ONE scene for an illustrator (40-70 words).
+
+Say who is in the scene (use their names and describe their look — hair, clothing, colors), what they are doing, and where they are. Present tense, concrete visual details only. ${ageLine}
+
+Describe ONLY the scene itself. Never mention "illustration", "picture", "art", "style", "3D", "Pixar", "render", "image", or camera/photography terms. Output only the scene description, no preamble.`;
+  const userPrompt = `Chapter title: "${chapterTitle}"\n\nChapter text:\n${excerpt}`;
+
+  try {
+    const briefCall = askLLMWithFallback(systemPrompt, userPrompt, 0.4, 220);
+    const timeoutCall = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Illustration brief timed out')), 45_000)
+    );
+    const raw = (await Promise.race([briefCall, timeoutCall])).trim();
+    const cleaned = raw
+      .replace(/^[`"'\s]+|[`"'\s]+$/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (cleaned.length >= 30) {
+      console.log(`[Illustration] Visual brief for "${chapterTitle}": ${cleaned.slice(0, 120)}...`);
+      return cleaned.slice(0, 480);
+    }
+    console.warn(`[Illustration] Visual brief too short (${cleaned.length} chars), using heuristic excerpt`);
+  } catch (e) {
+    console.warn(
+      '[Illustration] Visual brief LLM call failed, using heuristic excerpt:',
+      e instanceof Error ? e.message : e
+    );
+  }
+
+  // Heuristic fallback: the opening beats of the chapter itself — still
+  // derived from the real prose, never the outline synopsis.
+  const sentences = content.match(/[^.!?]+[.!?]+/g) ?? [];
+  const opening = (sentences.slice(0, 2).join(' ') || content.slice(0, 220))
+    .replace(/\s+/g, ' ')
+    .trim();
+  return opening.slice(0, 300);
+}
+
+/**
  * Initial entry point to start the book generation process.
  * Now only handles credit reservation and triggers the Outline phase.
  */
@@ -426,30 +485,35 @@ export async function generateChapter(bookId: string, ownerId: string, jobId: st
     // Handle Illustrations
     if (isChildrenBook && !isColoringBook) {
       try {
-        // For children's books, generate full-color illustrations that represent the content
-        const illustrationPrompt = chapter.synopsis || chapter.title;
+        // Build the scene from the ACTUAL generated chapter prose — not the
+        // outline synopsis written before the chapter existed — so the artwork
+        // matches what the page literally says.
+        const sceneBrief = await buildIllustrationBrief(chapterResult.content, chapter.title ?? '', targetAudience);
 
-        // For very young children (0-5), use even simpler prompts that focus on key elements
-        let simplifiedPrompt = illustrationPrompt;
+        // Light age tuning on top of the scene; the Pixar style anchor itself is
+        // prepended by generateImage so it leads the prompt.
+        let scenePrompt = sceneBrief;
         if (targetAudience === '0-5') {
-          // Simplify for toddlers - focus on basic elements like animals, colors, shapes
-          simplifiedPrompt = illustrationPrompt
-            .split(/[.,!?]/)[0] // Take just the first sentence if possible
-            .replace(/[^a-zA-Z0-9\s]/g, '') // Remove special characters
-            .substring(0, 100); // Limit length
-
-          // Add emphasis on visual elements for very young children
-          simplifiedPrompt = `Illustration of ${simplifiedPrompt}. Focus on bright colors, simple shapes, recognizable objects. Suitable for toddlers.`;
+          scenePrompt = `${sceneBrief}. Simple bold shapes, bright cheerful colors, uncluttered scene a toddler can read at a glance.`;
         } else {
-          // For older children, keep more descriptive content
-          simplifiedPrompt = `Illustration of ${simplifiedPrompt}. High quality, detailed, appropriate for children's book.`;
+          scenePrompt = `${sceneBrief}. Clear storybook composition around one focal moment, warm and friendly, age-appropriate.`;
         }
 
         // For children's books, use pixar style (full color) instead of lineart
         // This provides full-color illustrations that represent the content
-        const illustration = await generateChapterIllustration(bookId, ownerId, chapterIndex, simplifiedPrompt, 'pixar');
+        const characterNames: string[] = Array.isArray(book.characterNames)
+          ? (book.characterNames as string[]).filter((n): n is string => typeof n === 'string' && n.trim().length > 0)
+          : [];
+        const illustration = await generateChapterIllustration(
+          bookId,
+          ownerId,
+          chapterIndex,
+          scenePrompt,
+          'pixar',
+          characterNames.length > 0 ? characterNames.slice(0, 4) : undefined
+        );
         if (illustration.success && illustration.publicUrl) {
-          await db.chapter.update({ where: { id: chapter.id }, data: { illustrationUrl: illustration.publicUrl, illustrationPrompt: simplifiedPrompt } });
+          await db.chapter.update({ where: { id: chapter.id }, data: { illustrationUrl: illustration.publicUrl, illustrationPrompt: scenePrompt } });
         } else {
           console.error(`[Illustration] Generation failed for chapter ${chapterIndex + 1} (book ${bookId}): ${illustration.error ?? 'no URL returned'}`);
         }
