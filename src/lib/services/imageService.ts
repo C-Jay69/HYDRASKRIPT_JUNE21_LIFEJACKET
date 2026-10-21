@@ -895,18 +895,6 @@ export async function generateImage(options: GenerateImageOptions): Promise<Gene
     }
   }
 
-  // Fourth Backup: Gemini
-  if (process.env.GOOGLE_AI_API_KEY) {
-    console.log('[imageService] Trying Gemini as fourth backup');
-    try {
-      const geminiResult = await generateWithGemini(enhancedPrompt, { ...options, prompt: enhancedPrompt });
-      if (geminiResult.success) return geminiResult;
-      console.error('[imageService] Gemini image generation failed:', geminiResult.error);
-    } catch (error) {
-      console.error('[imageService] Gemini image generation failed with error:', error);
-    }
-  }
-
   // Final fallback: Pollinations (again, in case of specific failures)
   if (!process.env.POLLINATIONS_API_KEY) {
     console.log('[imageService] Final fallback to Pollinations (if not already tried)');
