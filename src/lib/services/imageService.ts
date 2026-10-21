@@ -463,19 +463,22 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
           bookId: options.bookId,
           prompt,
         });
-      } catch (error: any) {
-        if (error && typeof error === 'object' && error.name === 'AbortError') {
+      } catch (error) {
+        // Handle the case where error is of type 'unknown' in strict TypeScript settings
+        const err = error instanceof Error ? error : new Error(String(error));
+
+        if (err.name === 'AbortError') {
           console.error('[imageService] OpenRouter request timed out');
           if (attempt === maxRetries) {
             return { success: false, error: 'OpenRouter request timed out' };
           }
         } else {
-          console.error(`[imageService] OpenRouter attempt ${attempt} failed:`, error);
+          console.error(`[imageService] OpenRouter attempt ${attempt} failed:`, err);
           if (attempt === maxRetries) {
-            throw error;
+            throw err;
           }
         }
-        console.warn(`[imageService] OpenRouter failed (attempt ${attempt}/${maxRetries}):`, error instanceof Error ? error.message : String(error));
+        console.warn(`[imageService] OpenRouter failed (attempt ${attempt}/${maxRetries}):`, err.message);
         await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
       }
     }
