@@ -850,6 +850,8 @@ export async function generateImage(options: GenerateImageOptions): Promise<Gene
   // This ensures children's books use the Meta Muse model for better results
   const isChildrenBookIllustration = bookId && (assetType === 'illustration' || assetType === 'cover');
   console.log(`[imageService] isChildrenBookIllustration: ${isChildrenBookIllustration}`);
+  console.log(`[imageService] Process.env.OPENROUTER_API_KEY: ${process.env.OPENROUTER_API_KEY ? 'SET' : 'NOT SET'}`);
+  console.log(`[imageService] Process.env.OPEN_ROUTER_API_KEY: ${process.env.OPEN_ROUTER_API_KEY ? 'SET' : 'NOT SET'}`);
 
   // Try OpenRouter with Meta Muse for children's books first
   if (isChildrenBookIllustration) {
