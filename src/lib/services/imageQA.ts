@@ -41,9 +41,11 @@ Answer match=false ONLY for these failures:
 - An animal character is drawn as the wrong species (a cat instead of the dog, a tiger/bear/dinosaur instead of the named pet).
 - A child character is drawn as an adult or teenager.
 - A human character has animal features (animal ears, fur, a tail, a snout, paws).
+- A human character's identity contradicts their listed appearance: a girl drawn as a boy or a boy drawn as a girl, hair colour clearly different from the description (ginger or blond hair when black or dark brown is described, or the reverse), or a completely different hair style (short hair when long braids are described).
+- A human character's skin tone is clearly and unmistakably different from the description. Judge this generously — night scenes and coloured lights darken everyone's skin; reject only when no lighting could explain the difference.
 - The image shows a completely different setting or activity from the scene description.
 
-Answer match=true when the listed characters are all there exactly once, the animals are the right species, and the scene is recognisably the one described — minor differences in pose, props, clothing details or cropping are FINE.
+Answer match=true when the listed characters are all there exactly once, the animals are the right species, the humans match their described gender, hair and skin tone, and the scene is recognisably the one described — minor differences in pose, props, clothing details or cropping are FINE.
 
 Count the beings in the image carefully before answering. Reply with ONLY a JSON object, no other text:
 {"match": true, "problems": []} or {"match": false, "problems": ["short reason", "..."]}`;
@@ -56,7 +58,7 @@ export function buildQAPrompt(scene: string, cast: CharacterSheetEntry[]): { sys
     return `- ${entry.name}: a ${kind}${look}`;
   });
   const user = [
-    'Expected characters (each must appear exactly once, and no other people or animals):',
+    'Expected characters (each must appear exactly once, looking as described, and no other people or animals):',
     ...castLines,
     '',
     'Scene the picture was asked to show:',

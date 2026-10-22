@@ -18,7 +18,11 @@ import {
   buildChildrenCoverScene,
   buildExactCountClause,
   censusParts,
+  descriptorHasFreezableLook,
+  descriptorTraits,
+  enrichCharacterSheet,
   guessFallbackSheet,
+  identityPhrase,
   isCompleteSheet,
   normalizeDescriptor,
   parseCastEntry,
@@ -36,7 +40,7 @@ const Victoria = {
   name: 'Victoria',
   countNoun: 'girl',
   isAnimal: false,
-  descriptor: 'a girl about seven years old with curly red hair, freckles, yellow overalls and red rain boots',
+  descriptor: 'a girl about seven years old with curly red hair, fair skin and freckles, yellow overalls and red rain boots',
 };
 const BISCUIT = {
   name: 'Biscuit',
@@ -48,7 +52,7 @@ const DADA = {
   name: 'Dada',
   countNoun: 'father',
   isAnimal: false,
-  descriptor: 'a tall father with a short black beard in a green flannel shirt',
+  descriptor: 'a tall father with light skin, short black hair and a short black beard in a green flannel shirt',
 };
 const SHEET: CharacterSheet = [Victoria, BISCUIT, DADA];
 
@@ -92,6 +96,59 @@ describe('isCompleteSheet', () => {
     expect(isCompleteSheet([{ name: 'Biscuit', countNoun: 'puppy', isAnimal: true, descriptor: 'a puppy' }])).toBe(false);
     expect(isCompleteSheet([])).toBe(false);
   });
+
+  it('rejects a long-enough descriptor that pins no identity traits (the drift freeze)', () => {
+    // 17 chars: passed the old length-only gate and froze as canon, after
+    // which the heroine's hair, skin tone and apparent gender drifted on
+    // every page because nothing in the words pinned them.
+    expect(isCompleteSheet([{ name: 'Victoria', countNoun: 'girl', isAnimal: false, descriptor: 'a 4 year old girl' }])).toBe(false);
+    // Hair alone is not a frozen look either.
+    expect(isCompleteSheet([{ name: 'Victoria', countNoun: 'girl', isAnimal: false, descriptor: 'a girl with long black hair in two braids' }])).toBe(false);
+  });
+});
+
+describe('descriptorTraits (trait coverage)', () => {
+  const traits = (descriptor: string, isAnimal = false, countNoun = 'girl') =>
+    descriptorTraits({ name: 'X', countNoun, isAnimal, descriptor });
+
+  it('sees the production thin descriptor as pinning nothing', () => {
+    expect(traits('a 4 year old girl')).toEqual({ hair: false, skin: false, outfit: false, coat: false });
+    expect(
+      descriptorHasFreezableLook({ name: 'Victoria', countNoun: 'girl', isAnimal: false, descriptor: 'a 4 year old girl' })
+    ).toBe(false);
+  });
+
+  it('recognises hair through colour+style phrasings — but a beard alone is not hair', () => {
+    expect(traits('a red haired irishman', false, 'man').hair).toBe(true);
+    expect(traits('a girl with brown pigtails in a yellow sundress').hair).toBe(true);
+    expect(traits('a tiny girl with long black hair in two braids, light skin, a pink top').hair).toBe(true);
+    expect(traits('a tall father with a short black beard in a green flannel shirt', false, 'father').hair).toBe(false);
+    expect(traits('a bald grandfather with olive skin in a brown cardigan', false, 'grandfather').hair).toBe(true);
+  });
+
+  it('requires a TONE bound to skin — the bare word skin pins nothing', () => {
+    expect(traits('a girl with freckles on her skin, long black hair and a red dress').skin).toBe(false);
+    expect(traits('a girl with deep brown skin, black hair in a puff and a coral dress').skin).toBe(true);
+    expect(traits('a girl with light golden-brown skin and long black braids in a pink t-shirt').skin).toBe(true);
+  });
+
+  it('animals need a coat colour, not just a coloured accessory', () => {
+    expect(traits('a puppy with a blue collar', true, 'puppy').coat).toBe(false);
+    expect(traits('a black lab/retriever', true, 'dog').coat).toBe(true);
+    expect(traits('a small fluffy brown puppy with floppy ears and a blue collar', true, 'puppy').coat).toBe(true);
+    expect(traits('a loyal little dog', true, 'dog').coat).toBe(false);
+  });
+});
+
+describe('identityPhrase', () => {
+  it('lifts hair + skin verbatim for the census restatement', () => {
+    expect(identityPhrase(Victoria)).toBe('curly red hair and fair skin');
+    expect(
+      identityPhrase({ name: 'Dada', countNoun: 'father', isAnimal: false, descriptor: 'a tall red-haired father with fair skin in a blue shirt' })
+    ).toBe('red hair and fair skin');
+    expect(identityPhrase(BISCUIT)).toBeNull();
+    expect(identityPhrase({ name: 'Victoria', countNoun: 'girl', isAnimal: false, descriptor: 'a 4 year old girl' })).toBeNull();
+  });
 });
 
 describe('presentInScene', () => {
@@ -109,14 +166,14 @@ describe('anchorSceneWithSheet', () => {
   it('splices the frozen descriptor in at the first bare-name mention', () => {
     const scene = anchorSceneWithSheet('Victoria runs laughing across the golden meadow with Biscuit at her heels.', SHEET);
     expect(scene).toBe(
-      'Victoria, a girl about seven years old with curly red hair, freckles, yellow overalls and red rain boots, runs laughing across the golden meadow with Biscuit, a small fluffy brown puppy with floppy ears and a blue collar, at her heels.'
+      'Victoria, a girl about seven years old with curly red hair, fair skin and freckles, yellow overalls and red rain boots, runs laughing across the golden meadow with Biscuit, a small fluffy brown puppy with floppy ears and a blue collar, at her heels.'
     );
   });
 
   it('reuses an existing comma instead of doubling it', () => {
     const scene = anchorSceneWithSheet('Victoria, laughing, spins in a circle.', SHEET);
     expect(scene).toBe(
-      'Victoria, a girl about seven years old with curly red hair, freckles, yellow overalls and red rain boots, laughing, spins in a circle.'
+      'Victoria, a girl about seven years old with curly red hair, fair skin and freckles, yellow overalls and red rain boots, laughing, spins in a circle.'
     );
   });
 
@@ -127,7 +184,7 @@ describe('anchorSceneWithSheet', () => {
   });
 
   it('never stacks a second look on a character the brief already described verbatim', () => {
-    const described = 'Victoria, a girl about seven years old with curly red hair, freckles, yellow overalls and red rain boots, waves from the gate.';
+    const described = 'Victoria, a girl about seven years old with curly red hair, fair skin and freckles, yellow overalls and red rain boots, waves from the gate.';
     expect(anchorSceneWithSheet(described, SHEET)).toBe(described);
   });
 
@@ -156,6 +213,22 @@ describe('buildExactCountClause', () => {
     expect(clause).toContain('no twins');
     expect(clause).toContain('belong only to the puppy');
     expect(clause).toContain('completely normal human with no animal features');
+  });
+
+  it('restates hair and skin beside the census (the solo-scene recast)', () => {
+    // A playground page once replaced the heroine with a different child
+    // entirely: solo scene, one appositive fighting a long brief. The
+    // census lead now repeats the two most-drifted traits.
+    const { lead } = censusParts('Victoria climbs the rope net at the playground.', SHEET);
+    expect(lead).toContain('exactly one girl');
+    expect(lead).toContain('Victoria has curly red hair and fair skin.');
+  });
+
+  it('adds no identity sentence when the descriptor pins nothing', () => {
+    const thin: CharacterSheet = [
+      { name: 'Victoria', countNoun: 'girl', isAnimal: false, descriptor: 'a 4 year old girl' },
+    ];
+    expect(censusParts('Victoria climbs the rope net.', thin).lead).not.toContain('Victoria has');
   });
 
   it('counts two characters of the same kind correctly', () => {
@@ -281,6 +354,8 @@ describe('buildCharacterSheet', () => {
     expect(sheet).toHaveLength(2);
     expect(sheet[0].descriptor).toContain('yellow overalls');
     expect(isCompleteSheet(sheet)).toBe(true);
+    // A complete extraction must not spend a second (enrichment) LLM call.
+    expect(mockAskLLM).toHaveBeenCalledTimes(1);
   });
 
   it('backfills a cast member the LLM dropped and ignores invented extras', async () => {
@@ -330,6 +405,86 @@ describe('buildCharacterSheet', () => {
     expect(mockAskLLM).not.toHaveBeenCalled();
     expect(sheet).toEqual([{ name: 'Victoria', countNoun: 'character', isAnimal: false, descriptor: '' }]);
   });
+
+  it('enriches a thin extraction instead of freezing "a 4 year old girl"', async () => {
+    mockAskLLM
+      .mockResolvedValueOnce(JSON.stringify([
+        { name: 'Victoria', countNoun: 'girl', isAnimal: false, descriptor: 'a 4 year old girl' },
+        { name: 'Biscuit', countNoun: 'dog', isAnimal: true, descriptor: 'a loyal little dog' },
+      ]))
+      .mockResolvedValueOnce(JSON.stringify([
+        { name: 'Victoria', countNoun: 'girl', isAnimal: false, descriptor: 'a 4 year old girl with light golden-brown skin, long black hair in two braids, a pink t-shirt and denim shorts' },
+        { name: 'Biscuit', countNoun: 'dog', isAnimal: true, descriptor: 'a loyal little dog with glossy black fur and a red collar' },
+      ]));
+
+    const sheet = await buildCharacterSheet({
+      names: ['VICTORIA (4 YEAR OLD GIRL)', 'Biscuit'],
+      description: 'A little girl and her dog at the park.',
+      sampleProse: 'Victoria throws the ball. Biscuit runs and runs.',
+    });
+
+    expect(mockAskLLM).toHaveBeenCalledTimes(2);
+    // The enrichment ask names exactly what is missing, per character.
+    expect(mockAskLLM.mock.calls[1][1]).toContain('missing: hair colour and style, skin tone, signature outfit with its colour');
+    expect(sheet[0].descriptor).toContain('golden-brown skin');
+    // The user's own facts survive the expansion.
+    expect(sheet[0].descriptor).toContain('4 year old');
+    expect(isCompleteSheet(sheet)).toBe(true);
+  });
+
+  it('keeps the original descriptor when enrichment would drop a pinned trait', async () => {
+    mockAskLLM
+      .mockResolvedValueOnce(JSON.stringify([
+        { name: 'Dada', countNoun: 'father', isAnimal: false, descriptor: 'a tall red-haired father in a blue shirt' },
+      ]))
+      .mockResolvedValueOnce(JSON.stringify([
+        { name: 'Dada', countNoun: 'father', isAnimal: false, descriptor: 'a tall father with fair skin in a blue shirt' },
+      ]));
+
+    const sheet = await buildCharacterSheet({
+      names: ['Dada'],
+      description: 'A father takes his daughter to the harbour.',
+      sampleProse: 'Dada lifted the heavy rope with one hand.',
+    });
+
+    // The rewrite added skin tone but silently dropped the red hair:
+    // trading one drift for another is rejected, entry stays unfreezable.
+    expect(sheet[0].descriptor).toBe('a tall red-haired father in a blue shirt');
+    expect(isCompleteSheet(sheet)).toBe(false);
+  });
+
+  it('lets enrichment rescue a storm-day fallback (extraction down, enrichment up)', async () => {
+    mockAskLLM
+      .mockRejectedValueOnce(new Error('504 gateway timeout'))
+      .mockResolvedValueOnce(JSON.stringify([
+        { name: 'Victoria', countNoun: 'girl', isAnimal: false, descriptor: 'a 4 year old girl with warm olive skin, wavy chestnut hair and a teal dress' },
+        { name: 'Biscuit', countNoun: 'dog', isAnimal: true, descriptor: 'a puppy with soft cream fur and a green collar' },
+      ]));
+
+    const sheet = await buildCharacterSheet({
+      names: ['VICTORIA (4 YEAR OLD GIRL)', 'Biscuit'],
+      description: 'A girl and her puppy on a farm.',
+      sampleProse: 'Victoria raced her puppy Biscuit across the meadow.',
+    });
+
+    expect(sheet.map((e) => e.name)).toEqual(['Victoria', 'Biscuit']);
+    // Kinds always come from the deterministic side (hint/prose evidence),
+    // never from the enrichment reply, which called Biscuit a dog.
+    expect(sheet[1]).toMatchObject({ countNoun: 'puppy', isAnimal: true });
+    expect(sheet[1].descriptor).toContain('cream fur');
+    expect(isCompleteSheet(sheet)).toBe(true);
+  });
+});
+
+describe('enrichCharacterSheet', () => {
+  beforeEach(() => {
+    mockAskLLM.mockReset();
+  });
+
+  it('returns a complete sheet untouched without spending an LLM call', async () => {
+    await expect(enrichCharacterSheet(SHEET, {})).resolves.toEqual(SHEET);
+    expect(mockAskLLM).not.toHaveBeenCalled();
+  });
 });
 
 // The production cast format that defeated round 1: users type the whole
@@ -361,16 +516,32 @@ describe('decorated cast entries (the NULL-sheet regression)', () => {
     mockAskLLM.mockReset();
   });
 
-  it('the guessed sheet alone is complete enough to freeze from user hints', () => {
+  it('the guessed sheet from bare age/kind hints is usable but NOT freezable', () => {
     const sheet = guessFallbackSheet(DECORATED_CAST, 'Victoria steps onto the boat. Dada smiles. Truffle wags his tail.');
     expect(sheet.map((e) => e.name)).toEqual(['Victoria', 'Dada', 'Truffle']);
     expect(sheet[0]).toMatchObject({ countNoun: 'girl', isAnimal: false, descriptor: 'a 4 year old girl' });
     expect(sheet[1]).toMatchObject({ countNoun: 'man', isAnimal: false, descriptor: 'a red haired irishman' });
     expect(sheet[2]).toMatchObject({ countNoun: 'dog', isAnimal: true, descriptor: 'a black lab/retriever' });
+    // Round 2 froze exactly this sheet (every descriptor ≥15 chars) — and
+    // Victoria's hair, skin tone and apparent gender then drifted per page.
+    // Under trait coverage only Truffle's entry (coat colour pinned) is
+    // freezable; the humans go to enrichment instead of the freezer.
+    expect(descriptorHasFreezableLook(sheet[2])).toBe(true);
+    expect(isCompleteSheet(sheet)).toBe(false);
+  });
+
+  it('freezes straight from hints when the user packed the look into the spec', () => {
+    const sheet = guessFallbackSheet(
+      [
+        'VICTORIA (4 YEAR OLD GIRL WITH LONG BLACK HAIR IN TWO BRAIDS, LIGHT GOLDEN-BROWN SKIN, PINK T-SHIRT)',
+        'TRUFFLE (BLACK LAB/RETRIEVER)',
+      ],
+      'Victoria throws the ball. Truffle runs.'
+    );
     expect(isCompleteSheet(sheet)).toBe(true);
   });
 
-  it('still freezes a hint-based sheet when every LLM is rate-limited', async () => {
+  it('keeps generating from hints when every LLM is down, but does not freeze them', async () => {
     mockAskLLM.mockRejectedValue(new Error('429 Too Many Requests'));
 
     const sheet = await buildCharacterSheet({
@@ -379,8 +550,11 @@ describe('decorated cast entries (the NULL-sheet regression)', () => {
       sampleProse: 'Look! A big boat. Victoria walks on. Dada walks on. Truffle walks on. Wiggle, waggle, waggle!',
     });
 
+    // Generation is never blocked: names, kinds and the census all work.
     expect(sheet.map((e) => e.name)).toEqual(['Victoria', 'Dada', 'Truffle']);
-    expect(isCompleteSheet(sheet)).toBe(true);
+    // But the thin hint sheet must not freeze — the next chapter retries
+    // the real extraction instead of locking in a look that pins nothing.
+    expect(isCompleteSheet(sheet)).toBe(false);
   });
 
   it('merges clean extraction names onto the decorated cast and passes hints as authoritative', async () => {
