@@ -58,11 +58,15 @@ export const MIN_ATTEMPT_MS = envInt('LLM_MIN_ATTEMPT_MS', 25_000)
 /**
  * Default wall-clock cap for ONE provider request. It used to be 300s — the
  * entire Vercel function budget for a single HTTP call, which guaranteed that a
- * slow/overloaded provider ate the whole invocation. 120s still covers a long
- * chapter generation on nemotron/gemma while leaving room for two more tries.
+ * slow/overloaded provider ate the whole invocation. Lowered 120s -> 60s
+ * (Oct 2026): production logs showed 120s OpenRouter timeouts stacking inside
+ * the 300s function cap during free-tier storms. A model that cannot answer
+ * within 60s is storming, and rotating to the next provider beats waiting out
+ * the hang; inside the 240s claim budget that leaves room for ~3 more tries.
+ * Raise via LLM_TIMEOUT_MS if a slow flagship model legitimately needs room.
  */
 export function defaultRequestTimeoutMs(): number {
-  return envInt('LLM_TIMEOUT_MS', 120_000)
+  return envInt('LLM_TIMEOUT_MS', 60_000)
 }
 
 /** Runs `fn` inside a fresh LLM work budget. */

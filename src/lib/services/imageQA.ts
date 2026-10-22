@@ -85,14 +85,17 @@ export function parseQAVerdict(raw: string): QAVerdict | null {
 }
 
 /**
- * Vision models to try, in order. The free Gemma (already used across this
- * app, multimodal) goes first; cheap paid vision models back it up because
- * free-tier rate limits are exactly when books are being generated.
+ * Vision models to try, in order. Cheap PAID vision models lead: on a
+ * zero-balance account they fail instantly (402), while the free Gemma
+ * fails slowly — 20s timeouts and 502/504 storms, which is exactly how QA
+ * once fail-opened unchecked through a whole book while rogue frames
+ * shipped. The free Gemma stays as the last resort so an unfunded account
+ * still gets a real check whenever the free tier is healthy.
  */
 function qaModelCandidates(): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const m of [process.env.IMAGE_QA_MODEL, 'google/gemma-4-31b-it:free', 'google/gemini-2.5-flash', 'openai/gpt-4o-mini']) {
+  for (const m of [process.env.IMAGE_QA_MODEL, 'google/gemini-2.5-flash', 'openai/gpt-4o-mini', 'google/gemma-4-31b-it:free']) {
     const id = (m ?? '').trim();
     if (id && !seen.has(id)) {
       seen.add(id);
