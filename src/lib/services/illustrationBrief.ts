@@ -119,6 +119,55 @@ export function sanitizeBrief(raw: string): string {
 }
 
 /**
+ * Animal groups where naming the wrong species destroys the page (a kitten
+ * standing in for the story's dog). `evidence` words prove the group is what
+ * the chapter is actually about even when the prose only shows behaviour
+ * ("barked, wagging his tail") instead of the noun.
+ */
+const ANIMAL_GROUPS: Array<{ label: string; nouns: string[]; evidence: string[] }> = [
+  { label: 'cat', nouns: ['cat', 'kitten', 'kitty'], evidence: ['cat', 'kitten', 'kitty', 'meow', 'purr', 'purring'] },
+  { label: 'dog', nouns: ['dog', 'puppy', 'pup', 'hound'], evidence: ['dog', 'puppy', 'pup', 'hound', 'bark', 'barked', 'barking', 'wag', 'wagged', 'wagging', 'woof'] },
+  { label: 'horse', nouns: ['horse', 'pony', 'foal', 'mare', 'stallion'], evidence: ['horse', 'pony', 'foal', 'mare', 'stallion', 'neigh', 'neighed', 'gallop', 'galloped'] },
+  { label: 'rabbit', nouns: ['rabbit', 'bunny'], evidence: ['rabbit', 'bunny'] },
+  { label: 'bear', nouns: ['bear'], evidence: ['bear'] },
+  { label: 'fox', nouns: ['fox'], evidence: ['fox'] },
+  { label: 'mouse', nouns: ['mouse', 'rat'], evidence: ['mouse', 'mice', 'rat'] },
+  { label: 'pig', nouns: ['pig', 'piglet'], evidence: ['pig', 'piglet', 'oink'] },
+  { label: 'cow', nouns: ['cow', 'bull'], evidence: ['cow', 'bull', 'calf'] },
+  { label: 'sheep', nouns: ['sheep', 'lamb'], evidence: ['sheep', 'lamb'] },
+  { label: 'frog', nouns: ['frog', 'toad'], evidence: ['frog', 'toad', 'croak'] },
+  { label: 'dragon', nouns: ['dragon'], evidence: ['dragon'] },
+];
+
+function mentionsAny(text: string, words: string[]): boolean {
+  return words.some((w) => new RegExp(`\\b${w}(?:s|es)?\\b`, 'i').test(text));
+}
+
+/**
+ * Returns a human-readable contradiction when the brief puts an animal in the
+ * picture that the chapter contradicts — the brief's species never appears in
+ * the chapter, while a DIFFERENT species clearly does. That mismatch is how a
+ * chapter about Victoria and her dog shipped with a picture of a kitten: nothing
+ * between the brief writer and the artist checked the animal against the page.
+ *
+ * Deliberately conservative: if the chapter offers animal evidence for no
+ * group at all, the brief is allowed (it may have inferred correctly from
+ * context we do not pattern-match). We only reject a proven contradiction.
+ */
+export function findBriefContradiction(brief: string, content: string): string | null {
+  const briefGroups = ANIMAL_GROUPS.filter((g) => mentionsAny(brief, g.nouns));
+  if (briefGroups.length === 0) return null;
+  const chapterGroups = ANIMAL_GROUPS.filter((g) => mentionsAny(content, g.evidence));
+  for (const group of briefGroups) {
+    const supported = chapterGroups.some((g) => g.label === group.label);
+    if (!supported && chapterGroups.length > 0) {
+      return `brief puts a ${group.label} in the scene but the chapter only supports: ${chapterGroups.map((g) => g.label).join(', ')}`;
+    }
+  }
+  return null;
+}
+
+/**
  * Build the illustration brief from the ACTUAL generated chapter prose (not
  * the pre-written outline synopsis) so the artwork depicts what the page says.
  *
@@ -131,24 +180,29 @@ export function sanitizeBrief(raw: string): string {
 export async function buildIllustrationBrief(
   content: string,
   chapterTitle: string,
-  targetAudience: string
+  targetAudience: string,
+  characterNames?: string[]
 ): Promise<string> {
   const excerpt = selectChapterExcerpt(content);
   const ageLine =
     targetAudience === '0-5'
       ? 'Keep the scene very simple: one clear action, one setting, minimal props.'
       : 'Keep the scene focused: one clear focal moment.';
+  const cast = (characterNames ?? []).filter((n) => n.trim().length > 0).slice(0, 4);
+  const castLine = cast.length > 0 ? `\nSeries characters: ${cast.join(', ')}.` : '';
 
   const systemPrompt = `You are the art-brief writer for a children's picture book. Given a finished chapter, pick the single most important, most visual moment and describe it as ONE scene for an illustrator (40-70 words).
 
 Rules:
 - Say who is in the scene (use their names and describe their look — hair, clothing, colors), what they are doing, and where they are.
+- For EVERY character, state plainly WHAT they are, not just their name: "Victoria, a girl about seven with curly red hair…", "Biscuit, a fluffy brown puppy…". The illustrator has never met these characters — a bare name tells them nothing, and a pet described by name alone will be drawn as the wrong animal.
+- Only include characters who actually appear in this chapter, exactly as the text describes them (species, age, outfit). Never swap one animal for another.
 - The moment MUST be something that actually happens in this chapter text — never invent a scene that is not there.
 - Write only what a camera could see: visible actions, visible objects, visible setting. No feelings, no thoughts, no backstory.
 - Present tense, concrete visual details only. ${ageLine}
 
 Describe ONLY the scene itself. Never mention "illustration", "picture", "art", "style", "3D", "render", "image", or camera/photography terms. Output only the scene description, no preamble.`;
-  const userPrompt = `Chapter title: "${chapterTitle}"\n\nChapter text:\n${excerpt}`;
+  const userPrompt = `Chapter title: "${chapterTitle}"${castLine}\n\nChapter text:\n${excerpt}`;
 
   try {
     const briefCall = askLLMWithFallback(systemPrompt, userPrompt, 0.4, 220);
@@ -166,10 +220,19 @@ Describe ONLY the scene itself. Never mention "illustration", "picture", "art", 
       const raw = (await Promise.race([briefCall, timeoutCall])).trim();
       const cleaned = sanitizeBrief(raw);
       if (cleaned.length >= 30) {
-        console.log(`[Illustration] Visual brief for "${chapterTitle}": ${cleaned.slice(0, 120)}...`);
-        return cleaned.slice(0, 480);
+        // Grounding gate: a brief whose animal contradicts the chapter (page
+        // says dog, brief says kitten) must never reach the artist — discard
+        // it and fall back to the chapter's own most drawable sentences.
+        const contradiction = findBriefContradiction(cleaned, content);
+        if (contradiction) {
+          console.warn(`[Illustration] Rejecting brief for "${chapterTitle}" — ${contradiction}. Using heuristic excerpt.`);
+        } else {
+          console.log(`[Illustration] Visual brief for "${chapterTitle}": ${cleaned.slice(0, 120)}...`);
+          return cleaned.slice(0, 480);
+        }
+      } else {
+        console.warn(`[Illustration] Visual brief too short (${cleaned.length} chars), using heuristic excerpt`);
       }
-      console.warn(`[Illustration] Visual brief too short (${cleaned.length} chars), using heuristic excerpt`);
     } finally {
       // Always clear the timer: a pending 60s timer keeps the event loop (and
       // a serverless invocation) alive long after the brief is done.

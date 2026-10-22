@@ -43,18 +43,9 @@ export async function generateImageWorker(jobId: string, assetParams: {
       // of falling back to a generic "cinematic scene".
       let targetPrompt = prompt?.trim();
       const chapter = await db.chapter.findFirst({ where: { bookId, index: chapterIndex || 0 } });
-      if (!targetPrompt && chapter?.content?.trim()) {
-        targetPrompt = await buildIllustrationBrief(
-          chapter.content,
-          chapter.title ?? '',
-          targetAudience || '6-9'
-        );
-      }
-      if (!targetPrompt) {
-        targetPrompt = 'A cinematic scene from the story';
-      }
-      const style = targetAudience ? AUDIENCE_CONFIG[targetAudience as TargetAudience]?.illustrationStyle || 'pixar' : 'pixar';
-      // The cast lives on the book, not the chapter.
+      // The cast lives on the book, not the chapter. The brief writer needs it
+      // (to name the right characters and say what each one is) just as much
+      // as the illustrator call does, so load it before both.
       const bookRecord = await db.book.findUnique({
         where: { id: bookId },
         select: { characterNames: true },
@@ -64,8 +55,23 @@ export async function generateImageWorker(jobId: string, assetParams: {
             .filter((n): n is string => typeof n === 'string' && n.trim().length > 0)
             .slice(0, 4)
         : undefined;
+      if (!targetPrompt && chapter?.content?.trim()) {
+        targetPrompt = await buildIllustrationBrief(
+          chapter.content,
+          chapter.title ?? '',
+          targetAudience || '6-9',
+          characterNames
+        );
+      }
+      if (!targetPrompt) {
+        targetPrompt = 'A cinematic scene from the story';
+      }
+      const style = targetAudience ? AUDIENCE_CONFIG[targetAudience as TargetAudience]?.illustrationStyle || 'pixar' : 'pixar';
       result = await generateChapterIllustration(bookId, ownerId, chapterIndex || 0, targetPrompt, style, characterNames);
-      illustrationPrompt = targetPrompt;
+      // Store the EXACT prompt the backend received (style tag + scene +
+      // render vocabulary), not just the brief — that is what "what did the
+      // artist actually get?" has to answer when a picture misses the page.
+      illustrationPrompt = result.prompt ?? targetPrompt;
     }
 
     if (!result.success) {

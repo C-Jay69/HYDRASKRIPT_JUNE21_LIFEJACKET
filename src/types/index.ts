@@ -166,22 +166,28 @@ export const COLORING_THEMES: Record<ColoringTheme, { label: string; description
 // ─── Image Style Config ───────────────────────────────────────────────────────
 
 /**
- * `prompt` is the HEAD of every generated prompt (style first — image models
- * weight the head of a prompt most heavily) and `tail` is repeated at the very
- * END of the prompt. Weak image models attend most to the head, strong ones to
- * the tail; repeating the style anchor on both ends is what stops the scene
- * description from washing the house style out of the result.
+ * `prompt` is the HEAD of every generated prompt and `tail` is repeated at the
+ * very END. The head must stay SHORT — a few words only. Image models built on
+ * CLIP text encoders (Flux, SD3/Stable Image Core) only ever "see" roughly the
+ * first 77 tokens (~300 characters) of a prompt through that encoder, so the
+ * SCENE — who is doing what, where — has to land inside that window or the
+ * model draws whatever the style words alone suggest (a generic cute subject,
+ * identical on every page). The full render vocabulary therefore lives in the
+ * `tail`: models with long-context encoders (T5, Seedream, Gemini) still read
+ * it, and it reinforces the look without evicting the subject.
+ *
+ * Order in the final prompt: short style tag → scene → full style vocabulary.
  */
 export const STYLE_CONFIG: Record<string, { prompt: string; size: string; tail?: string }> = {
   pixar: {
-    // Lead style anchor — generateImage places this FIRST in the prompt so the
-    // image model anchors on the style before reading the scene description.
-    prompt: 'A single frame from a modern Pixar-style 3D animated feature film, stylized 3D character design with rounded appealing proportions, large expressive eyes, soft subsurface-scattering skin and fur, richly detailed environment, vibrant saturated color palette, warm cinematic key light with soft rim lighting, shallow depth of field, high-end physically based render, clean readable storybook composition',
+    // Lead style tag — deliberately brief so the scene description starts
+    // within the first tokens of the prompt, where every encoder reads it.
+    prompt: 'Pixar-style 3D animated feature film frame',
     size: '1344x768',
-    // Closing style anchor — repeated last so the scene description cannot
-    // dilute the look. Also carries the "no text" guard: image models love to
-    // stamp gibberish lettering across a picture-book page.
-    tail: 'Pixar-style 3D animated feature film frame, stylized rounded character design, cinematic lighting, vibrant colors. No text, no lettering, no watermark.',
+    // Full render vocabulary + the "no text" guard (image models love to stamp
+    // gibberish lettering across a picture-book page). Kept at the tail so it
+    // cannot push the scene out of the encoders' early window.
+    tail: 'Modern Pixar-style 3D animated feature film still, stylized 3D character design with rounded appealing proportions, large expressive eyes, soft subsurface-scattering skin and fur, richly detailed environment, vibrant saturated color palette, warm cinematic key light with soft rim lighting, shallow depth of field, high-end physically based render, clean readable storybook composition, cinematic lighting, vibrant colors. No text, no lettering, no watermark.',
   },
   lineart: {
     prompt: 'Clean black outline line art on white, thick even strokes, simple shapes, large white areas to color. No shading or color.',
@@ -194,27 +200,30 @@ export const STYLE_CONFIG: Record<string, { prompt: string; size: string; tail?:
     tail: 'Black contour line art on white, unshaded, uncolored.',
   },
   watercolor: {
-    prompt: 'Delicate watercolor illustration, soft pastel colors, dreamy atmosphere, artistic brush strokes',
+    prompt: 'Delicate watercolor illustration',
     size: '1024x1024',
-    tail: 'Watercolor illustration, soft pastel washes, visible paper texture.',
+    tail: 'Delicate watercolor illustration, soft pastel colors, dreamy atmosphere, artistic brush strokes, soft pastel washes, visible paper texture.',
   },
   realistic: {
-    prompt: 'Photorealistic style, dramatic lighting, high detail, professional composition',
+    prompt: 'Photorealistic photograph',
     size: '1344x768',
-    tail: 'Photorealistic photograph, natural lighting, sharp focus.',
+    tail: 'Photorealistic style, dramatic lighting, high detail, professional composition, natural lighting, sharp focus.',
   },
   // AI Cover Designer presets
   cyberpunk: {
-    prompt: 'Cyberpunk aesthetic, neon-drenched cityscape, high-tech low-life, holographic advertisements, rain-slicked streets, glowing signs, chrome and circuitry, volumetric lighting, Blade Runner atmosphere, cinematic composition, highly detailed',
+    prompt: 'Cyberpunk aesthetic',
     size: '1344x768',
+    tail: 'Cyberpunk aesthetic, neon-drenched cityscape, high-tech low-life, holographic advertisements, rain-slicked streets, glowing signs, chrome and circuitry, volumetric lighting, Blade Runner atmosphere, cinematic composition, highly detailed.',
   },
   noir: {
-    prompt: 'Film noir style, high contrast black and white, dramatic shadows, Venetian blind lighting, smoke and fog, gritty urban atmosphere, chiaroscuro, 1940s detective aesthetic, moody, cinematic, heavy grain',
+    prompt: 'Film noir style, high contrast black and white',
     size: '1344x768',
+    tail: 'Film noir style, dramatic shadows, Venetian blind lighting, smoke and fog, gritty urban atmosphere, chiaroscuro, 1940s detective aesthetic, moody, cinematic, heavy grain.',
   },
   minimalist: {
-    prompt: 'Minimalist book cover design, clean negative space, bold typography, simple geometric shapes, limited color palette, modern design, iconic imagery, professional publishing quality',
+    prompt: 'Minimalist book cover design',
     size: '1344x768',
+    tail: 'Minimalist book cover design, clean negative space, bold typography, simple geometric shapes, limited color palette, modern design, iconic imagery, professional publishing quality.',
   },
 };
 

@@ -6,21 +6,38 @@
 chapter prose
    └─ buildIllustrationBrief()      → scene brief written from the chapter's own text
         └─ generateImage()
-             ├─ composeImagePrompt()  → [style anchor] + [scene] + [style anchor]
+             ├─ composeImagePrompt()  → [short style tag] + [scene] + [full style vocabulary]
              ├─ buildNegativePrompt() → "photo, anime, 2D cartoon, text, …"
              └─ backend chain         → Pollinations → OpenRouter → Stability → Pruna
 ```
 
 Two things decide whether the artwork looks like a Pixar picture book:
 
-1. **The prompt.** The style anchor is now placed at *both* ends of the prompt
-   and a negative prompt names every look that competes with it. A model that
-   drifts into a flat 2D cartoon, a photograph or a page of gibberish
-   lettering was almost always told what to avoid nowhere.
+1. **The prompt.** A *short* style tag leads, the scene comes immediately
+   after it, and the full style vocabulary closes the prompt; a negative
+   prompt names every look that competes with it. The scene MUST start within
+   roughly the first 300 characters: CLIP-based encoders (Flux, SD3) only read
+   about the first 77 tokens, so a long style essay at the head evicts the
+   subject and the model draws the style words' default subject instead (that
+   is how every page of a dog story shipped with a kitten).
 2. **The scene brief.** The brief writer sees the whole chapter (head + tail
-   when it has to be trimmed), and the fallback picks the chapter's most
-   drawable sentences instead of its first two. A brief written from the wrong
-   part of the story is what "the picture does not match the page" looks like.
+   when it has to be trimmed) plus the series cast, must state what every
+   character IS ("Biscuit, a fluffy brown puppy" — a name alone tells the
+   illustrator nothing), and the fallback picks the chapter's most drawable
+   sentences instead of its first two. A brief whose animal contradicts the
+   chapter (page says dog, brief says kitten) is rejected by the grounding
+   gate in `findBriefContradiction()` before it ever reaches the artist.
+3. **The seed.** Every picture is seeded from book + chapter + prompt
+   (`deriveImageSeed`). Seeding from the book alone gave every chapter the
+   identical seed, so each illustration started from the same latent noise
+   and converged on the same subject. If every page shows near-identical art,
+   suspect the seed first.
+4. **The transport.** With `POLLINATIONS_API_KEY` set, requests go to the
+   authenticated `gen.pollinations.ai` API with a Bearer header and spend the
+   account's Pollen balance. Without a key they fall back to the anonymous
+   legacy endpoint (throttled, watermark not reliably removed). The log line
+   `[imageService] Pollinations via …` says which one ran. To see exactly
+   what the artist was asked for, read `chapter.illustrationPrompt`.
 
 ## Environment variables
 
@@ -87,13 +104,28 @@ Top up at enter.pollinations.ai. The service detects the "insufficient
 balance" response and stops burning retries on it.
 
 ### The artwork does not match the page
-1. Read `chapter.illustrationPrompt` — it stores the exact scene brief that
-   was sent to the artist.
+1. Read `chapter.illustrationPrompt` — it stores the exact composed prompt
+   (style tag + scene + style vocabulary) that was sent to the backend.
+   If the scene in it is wrong, the problem is the brief; if the scene is
+   right but the picture is wrong, the problem is the backend/seed.
 2. Look for `[Illustration] Using heuristic brief:` in the logs. That means the
    brief LLM call failed or timed out and the fallback was used.
-3. The brief is derived from the chapter prose, so a stale illustration means a
+3. Look for `[Illustration] Rejecting brief for …` — the grounding gate caught
+   a brief whose animal contradicted the chapter and fell back to the
+   chapter's own sentences.
+4. The brief is derived from the chapter prose, so a stale illustration means a
    stale chapter — retrying the chapter now also clears the old illustration
    and regenerates it.
+
+### The same wrong subject appears on every page (e.g. a kitten in a dog book)
+This was a real production failure with three stacked causes, all fixed:
+the seed was derived from the book alone (identical for every chapter), a
+401-character style essay sat *before* the scene (outside the ~77-token
+window CLIP encoders read, so Flux never saw the scene), and the brief could
+name a pet without saying what species it is. If it ever recurs, check in
+order: `chapter.illustrationPrompt` (does the scene name the right animal,
+in the first ~300 characters?), the `[imageService] Pollinations via …` log
+line (authenticated or anonymous?), and `POLLINATIONS_MODEL`.
 
 ## Monitoring and debugging
 
