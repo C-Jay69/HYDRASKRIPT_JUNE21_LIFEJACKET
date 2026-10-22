@@ -105,10 +105,17 @@ export function buildNegativePrompt(style: string, assetType: string): string {
 }
 
 /**
- * Compose the final prompt: style anchor FIRST (models weight the head of a
- * prompt most heavily), the scene in the middle, and the style anchor again
- * LAST (models also weight the tail — repeating it stops the scene text from
- * washing the look out, which is what "not really Pixar" looked like).
+ * Compose the final prompt: a SHORT style tag first, then the scene, then the
+ * full style vocabulary last.
+ *
+ * The scene must start within roughly the first 77 tokens (~300 characters):
+ * CLIP-based encoders (Flux, SD3) never read past that window, so a long
+ * style essay at the head evicts the subject entirely and the model draws
+ * whatever the style words alone suggest — the same generic cute subject on
+ * every page. Keeping the head to a tag ("Pixar-style 3D animated feature
+ * film frame") puts the chapter's actual moment where every encoder sees it,
+ * while the detailed render vocabulary in the tail is still read by the
+ * long-context encoders and reinforces the house look.
  */
 export function composeImagePrompt(styleKey: string, scene: string): string {
   const styleConfig = STYLE_CONFIG[styleKey] || STYLE_CONFIG.pixar;
@@ -123,6 +130,31 @@ export function composeImagePrompt(styleKey: string, scene: string): string {
   return tail
     ? `${styleConfig.prompt}. ${sceneText}. ${tail}`
     : `${styleConfig.prompt}. ${sceneText}`;
+}
+
+/** Small stable string hash (djb2-style), used for seed derivation. */
+export function hashString(input: string): number {
+  let hash = 0;
+  for (let i = 0; i < input.length; i++) {
+    hash = ((hash << 5) - hash + input.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash) % 2147483647;
+}
+
+/**
+ * Derive the diffusion seed for ONE image.
+ *
+ * The parts must identify the specific picture — book, asset type, chapter
+ * salt and the prompt itself. Seeding from the book alone (the old behaviour)
+ * gave every chapter in a book the identical seed, so each illustration
+ * started from the same latent noise under near-identical prompt openings and
+ * converged on the same generic subject page after page. A seed does not
+ * provide character consistency across different prompts anyway; consistent
+ * character *descriptions* in the text do that. What a seed must never do is
+ * repeat across different scenes.
+ */
+export function deriveImageSeed(...parts: Array<string | number | undefined | null>): number {
+  return hashString(parts.map((p) => (p === undefined || p === null ? '' : String(p))).join(':'));
 }
 
 /**

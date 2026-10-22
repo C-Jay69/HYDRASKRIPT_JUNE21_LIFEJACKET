@@ -6,6 +6,7 @@ import { COLORING_THEMES } from '@/types';
 import {
   buildNegativePrompt,
   composeImagePrompt,
+  deriveImageSeed,
   resolveBackendOrder,
   BACKEND_LABELS,
   type ImageBackend,
@@ -22,6 +23,12 @@ export interface GenerateImageOptions {
   bookId?: string;
   assetType: string;
   negativePrompt?: string;
+  /**
+   * Identifies the specific picture within the book (e.g. "chapter-3",
+   * "cover"). Part of the seed derivation so two different illustrations in
+   * the same book never start from the same latent noise.
+   */
+  seedSalt?: string;
 }
 
 export interface GeneratedImageResult {
@@ -477,22 +484,27 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
     console.log(`[imageService] Attempting OpenRouter /api/v1/images with model ${model}`);
 
     const maxRetries = 3;
-    // A stable per-book seed keeps characters/art consistent across chapters.
-    // Retries shift the seed so a rejected frame is not simply re-drawn.
-    const baseSeed = hashString(`${options.bookId ?? options.ownerId}:${options.assetType}`) % 2147483647;
+    // Seed identifies THIS picture (book + chapter + prompt), never the book
+    // alone — a per-book seed made every chapter start from identical noise
+    // and converge on the same subject. Retries shift the seed so a rejected
+    // frame is not simply re-drawn.
+    const baseSeed = deriveImageSeed(options.bookId ?? options.ownerId, options.assetType, options.seedSalt, prompt);
+    // Recovery state for models that reject a field. This MUST live outside
+    // the attempt loop: the body is rebuilt per attempt, so mutating the body
+    // and `continue`-ing (the old code) silently re-added the rejected field
+    // and burned every retry on the same failing request.
+    let dropNegativePrompt = false;
+    let sizeOverride: string | undefined;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      // Body is rebuilt per attempt so a rejected field (negative_prompt) or
-      // an unsupported size can be dropped and the request retried instead of
-      // failing the whole call.
       const bodyPayload: Record<string, unknown> = {
         model,
         prompt,
-        size: options.size || '1024x1024',
+        size: sizeOverride || options.size || '1024x1024',
         output_format: 'png',
         n: 1,
         seed: (baseSeed + (attempt - 1) * 7919) % 2147483647,
       };
-      if (options.negativePrompt) bodyPayload.negative_prompt = options.negativePrompt;
+      if (options.negativePrompt && !dropNegativePrompt) bodyPayload.negative_prompt = options.negativePrompt;
       try {
         console.log(`[imageService] OpenRouter attempt ${attempt}`);
 
@@ -520,18 +532,19 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
             (errorData.error?.message ? ` - ${errorData.error.message}` : '');
           console.error('[imageService] OpenRouter API error:', errorMsg);
           // Not every image model accepts a negative prompt. Drop the field and
-          // retry the same request rather than failing the illustration.
-          if (bodyPayload.negative_prompt && /negative|unknown|unrecognized|invalid/i.test(errorMsg)) {
+          // retry the same request rather than failing the illustration. The
+          // flag lives outside the loop because the body is rebuilt per attempt.
+          if (!dropNegativePrompt && bodyPayload.negative_prompt && /negative|unknown|unrecognized|invalid/i.test(errorMsg)) {
             console.warn('[imageService] OpenRouter rejected negative_prompt — retrying without it');
-            delete bodyPayload.negative_prompt;
+            dropNegativePrompt = true;
             continue;
           }
           // Some models only accept a fixed set of canvas sizes; fall back to
           // the nearest supported one that keeps the same orientation.
-          if (/size|resolution|aspect|dimension/i.test(errorMsg) && bodyPayload.size !== '1024x1024') {
+          if (/size|resolution|aspect|dimension/i.test(errorMsg) && bodyPayload.size !== '1024x1024' && !sizeOverride) {
             const fallbackSize = normalizeOpenRouterSize(String(bodyPayload.size));
             console.warn(`[imageService] OpenRouter rejected size ${bodyPayload.size} — retrying with ${fallbackSize}`);
-            bodyPayload.size = fallbackSize;
+            sizeOverride = fallbackSize;
             continue;
           }
           throw new Error(errorMsg);
@@ -621,8 +634,9 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
 
 /**
  * Backend 2: Pollinations AI.
- * Fetches image from URL and converts to base64. Honors the requested size,
- * model, and uses a deterministic per-book seed for character consistency.
+ * Fetches image from URL and converts to base64. Honors the requested size
+ * and model, with a per-picture seed. Authenticated (gen.pollinations.ai)
+ * when POLLINATIONS_API_KEY is set; legacy anonymous endpoint otherwise.
  */
 function pollinationsSize(size: ImageSize): { width: number; height: number } {
   const [w, h] = size.split('x').map((n) => parseInt(n, 10));
@@ -632,19 +646,33 @@ function pollinationsSize(size: ImageSize): { width: number; height: number } {
   return { width: 1024, height: 1024 };
 }
 
-function hashString(input: string): number {
-  let hash = 0;
-  for (let i = 0; i < input.length; i++) {
-    hash = ((hash << 5) - hash + input.charCodeAt(i)) | 0;
+/**
+ * Fit a negative prompt into a URL query budget, keeping the earliest terms.
+ *
+ * Pollinations carries the prompt in the URL path; the full illustration
+ * negative list adds ~600 encoded characters and pushes the request past
+ * 2,200 characters, where CDN/proxy behaviour gets unreliable. The negative
+ * lists are ordered most-important first (photograph, anime, flat 2D…), and
+ * Flux largely ignores negatives anyway — so for URL transport we keep only
+ * the leading terms instead of risking the whole request.
+ */
+function fitNegativeForUrl(negativeText: string, maxChars = 160): string {
+  if (negativeText.length <= maxChars) return negativeText;
+  const kept: string[] = [];
+  let length = 0;
+  for (const term of negativeText.split(', ')) {
+    if (length + term.length + 2 > maxChars) break;
+    kept.push(term);
+    length += term.length + 2;
   }
-  return Math.abs(hash) % 2147483647;
+  return kept.join(', ');
 }
 
-async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
+async function fetchWithTimeout(url: string, timeoutMs: number, headers?: Record<string, string>): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { signal: controller.signal });
+    return await fetch(url, { signal: controller.signal, headers });
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
       throw new Error('Pollinations request timed out');
@@ -671,22 +699,42 @@ async function generateWithPollinations(prompt: string, size: ImageSize, options
   // line art is pushed away from color, full-color illustrations are pushed
   // away from every look that competes with the style anchor (photos, anime,
   // 2D cartoons, painted illustration, stray lettering).
-  const negativeText = options.negativePrompt || buildNegativePrompt(options.style || 'pixar', options.assetType);
+  const negativeText = fitNegativeForUrl(
+    options.negativePrompt || buildNegativePrompt(options.style || 'pixar', options.assetType)
+  );
   const negative = negativeText
     ? `&negative_prompt=${encodeURIComponent(negativeText)}`
     : '';
 
+  // Authenticated requests go to the unified gen.pollinations.ai API with the
+  // account key as a Bearer header, spending the account's Pollen balance:
+  // full model access, no anonymous throttling, watermark removal honoured.
+  // The old code only checked that a key EXISTED and then called the legacy
+  // endpoint anonymously — the paid balance was never used and every request
+  // ran on the throttled anonymous tier. Without a key we keep the legacy
+  // endpoint as the historical anonymous last resort.
+  const apiKey = process.env.POLLINATIONS_API_KEY?.trim();
+  const endpointBase = apiKey
+    ? 'https://gen.pollinations.ai/image'
+    : 'https://image.pollinations.ai/prompt';
+  const authHeaders = apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined;
+  console.log(
+    `[imageService] Pollinations via ${apiKey ? 'gen.pollinations.ai (authenticated)' : 'image.pollinations.ai (anonymous legacy)'} model=${model}`
+  );
+
   const maxRetries = 4;
-  const baseSeed = hashString(`${options.bookId ?? options.ownerId}:${options.assetType}`);
+  // Per-picture seed (book + chapter + prompt) — a per-book seed made every
+  // chapter converge on the same subject.
+  const baseSeed = deriveImageSeed(options.bookId ?? options.ownerId, options.assetType, options.seedSalt, prompt);
   let lastError = '';
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     // Vary the seed per attempt: Pollinations occasionally returns a flat,
     // degenerate image for line-art prompts, and a fresh seed nearly always
     // yields a usable one.
     const seed = (baseSeed + attempt * 7919) % 2147483647;
-    const pollinationsUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=${width}&height=${height}&model=${model}&seed=${seed}&nologo=true${negative}`;
+    const pollinationsUrl = `${endpointBase}/${encodedPrompt}?width=${width}&height=${height}&model=${model}&seed=${seed}&nologo=true${negative}`;
     try {
-      const response = await fetchWithTimeout(pollinationsUrl, 60_000);
+      const response = await fetchWithTimeout(pollinationsUrl, 60_000, authHeaders);
       if (!response.ok) {
         const body = await response.text().catch(() => '');
         if (/insufficient balance|insufficient_balance|top up|pollen/i.test(body)) {
@@ -807,7 +855,8 @@ async function generateWithPruna(prompt: string, size: ImageSize, options: Gener
   if (!apiKey) return { success: false, error: 'No Pruna API key configured' };
 
   const aspect_ratio = prunaAspectRatio(size);
-  const baseSeed = hashString(`${options.bookId ?? options.ownerId}:${options.assetType}`);
+  // Per-picture seed (book + chapter + prompt) — never per-book alone.
+  const baseSeed = deriveImageSeed(options.bookId ?? options.ownerId, options.assetType, options.seedSalt, prompt);
   // Bounded retries: this backend sits in a fallback chain that blocks the
   // book's chapter pipeline, so it must fail fast rather than stall it.
   const maxRetries = 3;
@@ -914,8 +963,7 @@ async function generateWithPruna(prompt: string, size: ImageSize, options: Gener
 
 /**
  * Backend 3: Stability AI (stable-image / core).
- * Uses a stable per-book seed for character consistency and honors the
- * requested aspect ratio. Returns JSON with a base64 `image` payload.
+ * Uses a per-picture seed and honors the requested aspect ratio. Returns JSON with a base64 `image` payload.
  */
 function stabilityAspectRatio(size: ImageSize): string {
   const [w, h] = size.split('x').map((n) => parseInt(n, 10));
@@ -935,24 +983,27 @@ async function generateWithStability(prompt: string, size: ImageSize, options: G
   if (!apiKey) return { success: false, error: 'No Stability API key configured' };
 
   const aspectRatio = stabilityAspectRatio(size);
-  // A stable per-book seed keeps characters/art consistent across chapters.
-  const seed = hashString(`${options.bookId ?? options.ownerId}:${options.assetType}`) % 2147483647;
+  // Per-picture seed (book + chapter + prompt). The old per-book seed was
+  // also fixed across retries, so Stability literally re-drew the identical
+  // image for every chapter and every retry.
+  const baseSeed = deriveImageSeed(options.bookId ?? options.ownerId, options.assetType, options.seedSalt, prompt);
 
-  const form = new FormData();
-  form.append('prompt', prompt);
-  form.append('aspect_ratio', aspectRatio);
-  form.append('output_format', 'png');
-  form.append('seed', String(seed));
   // Negative prompt: line art is pushed away from color, full-colour art is
   // pushed away from every look that competes with the style anchor (photos,
   // anime, 2D cartoons, painted illustration, stray lettering).
   const negativeText = options.negativePrompt || buildNegativePrompt(options.style || 'pixar', options.assetType);
-  if (negativeText) {
-    form.append('negative_prompt', negativeText);
-  }
 
   const maxRetries = 3;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    // Form is built per attempt so the seed can shift between retries.
+    const form = new FormData();
+    form.append('prompt', prompt);
+    form.append('aspect_ratio', aspectRatio);
+    form.append('output_format', 'png');
+    form.append('seed', String((baseSeed + (attempt - 1) * 7919) % 2147483647));
+    if (negativeText) {
+      form.append('negative_prompt', negativeText);
+    }
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 60_000);
@@ -1028,8 +1079,8 @@ function isBackendConfigured(backend: ImageBackend): boolean {
 /**
  * Generate an image using the available backends with prioritized fallbacks.
  *
- * The prompt is composed as: style anchor → scene → style anchor again, and a
- * matching negative prompt is passed to every backend that supports one.
+ * The prompt is composed as: short style tag → scene → full style vocabulary,
+ * and a matching negative prompt is passed to every backend that supports one.
  */
 export async function generateImage(options: GenerateImageOptions): Promise<GeneratedImageResult> {
   const { prompt, style = 'pixar', size = '1024x1024', ownerId, bookId, assetType } = options;
@@ -1119,7 +1170,7 @@ export async function generateBookCover(bookId: string, ownerId: string, bookTit
     coverPrompt = `Professional book cover for "${bookTitle}". ${genre} genre. Cinematic, elegant, no text.`;
   }
 
-  return generateImage({ prompt: coverPrompt, style, size: '1344x768', ownerId, bookId, assetType: 'cover' });
+  return generateImage({ prompt: coverPrompt, style, size: '1344x768', ownerId, bookId, assetType: 'cover', seedSalt: 'cover' });
 }
 
 /**
@@ -1135,15 +1186,20 @@ export async function generateChapterIllustration(bookId: string, ownerId: strin
   // least — the scene is what makes the artwork match the page.
   let finalPrompt = illustrationPrompt;
   if (characterNames && characterNames.length > 0) {
-    const hero = characterNames[0];
-    finalPrompt = `${illustrationPrompt} The recurring main character is ${hero}: keep ${hero}'s face, hairstyle, outfit and colour palette identical in every illustration of this series.`;
+    // Name the WHOLE recurring cast, not just the first name — the old note
+    // anchored the hero and left every companion (usually the animal sidekick)
+    // for the model to invent. The brief itself must still say what each
+    // character IS ("Biscuit, a fluffy brown puppy"); this note only reinforces
+    // that these exact recurring characters belong in the picture.
+    const cast = characterNames.slice(0, 4).join(', ');
+    finalPrompt = `${illustrationPrompt} Recurring characters in this series: ${cast} — keep their faces, hairstyles, outfits, fur and colour palettes consistent with the description above.`;
   }
 
   // For children's books, ensure we're generating full-color illustrations
   // that can be paired with text on 50% of the page
   const effectiveStyle = style;
 
-  return generateImage({ prompt: finalPrompt, style: effectiveStyle, size: '1344x768', ownerId, bookId, assetType: 'illustration' });
+  return generateImage({ prompt: finalPrompt, style: effectiveStyle, size: '1344x768', ownerId, bookId, assetType: 'illustration', seedSalt: `chapter-${chapterIndex}` });
 }
 
 /**
@@ -1198,5 +1254,6 @@ export async function generateColoringPage(bookId: string, ownerId: string, chap
     ownerId,
     bookId,
     assetType: 'coloring_page',
+    seedSalt: `chapter-${chapterIndex}`,
   });
 }

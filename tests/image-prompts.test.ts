@@ -8,6 +8,7 @@
 import {
   buildNegativePrompt,
   composeImagePrompt,
+  deriveImageSeed,
   resolveBackendOrder,
   ILLUSTRATION_NEGATIVE_PROMPT,
   LINE_ART_NEGATIVE_PROMPT,
@@ -35,6 +36,31 @@ describe('composeImagePrompt', () => {
 
     expect(headIndex).toBeLessThan(sceneIndex);
     expect(sceneIndex).toBeLessThan(tailIndex);
+  });
+
+  it('puts the scene inside the early encoder window, not after a style essay', () => {
+    // CLIP-based encoders (Flux, SD3) only read roughly the first 77 tokens
+    // (~300 chars). The regression this guards: a 401-char style head pushed
+    // the scene to char 403, so the model drew the style words' default
+    // subject on every page. The scene's first words must land early.
+    const scene = 'Victoria, a girl in yellow overalls and red boots, races Biscuit, a fluffy brown puppy, across a wildflower meadow.';
+    const prompt = composeImagePrompt('pixar', scene);
+    expect(prompt.indexOf('Victoria')).toBeLessThan(120);
+    expect(prompt.slice(0, 300)).toContain('Biscuit');
+  });
+
+  it('keeps the pixar head short enough that the subject leads', () => {
+    expect(STYLE_CONFIG.pixar.prompt.length).toBeLessThan(80);
+  });
+
+  it('still carries the full pixar render vocabulary, at the tail', () => {
+    const prompt = composeImagePrompt('pixar', 'Maya holds the red kite above her head.');
+    expect(prompt).toContain('subsurface-scattering');
+    expect(prompt).toContain('physically based render');
+    expect(prompt).toContain('rounded appealing proportions');
+    expect(prompt).toContain('No text, no lettering, no watermark');
+    // …and all of it AFTER the scene, where it cannot evict the subject.
+    expect(prompt.indexOf('Maya holds')).toBeLessThan(prompt.indexOf('subsurface-scattering'));
   });
 
   it('collapses whitespace so the scene stays a single readable block', () => {
@@ -92,6 +118,31 @@ describe('buildNegativePrompt', () => {
 
     const cyberpunk = buildNegativePrompt('cyberpunk', 'cover');
     expect(cyberpunk).toMatch(/black and white/);
+  });
+});
+
+describe('deriveImageSeed', () => {
+  it('is deterministic for identical inputs', () => {
+    expect(deriveImageSeed('book1', 'illustration', 'chapter-0', 'Victoria races Biscuit'))
+      .toBe(deriveImageSeed('book1', 'illustration', 'chapter-0', 'Victoria races Biscuit'));
+  });
+
+  it('differs between chapters of the same book (the per-book-seed regression)', () => {
+    const ch1 = deriveImageSeed('book1', 'illustration', 'chapter-0', 'Victoria races Biscuit across the meadow');
+    const ch2 = deriveImageSeed('book1', 'illustration', 'chapter-1', 'Victoria and Biscuit shelter from the rain in the barn');
+    expect(ch1).not.toBe(ch2);
+  });
+
+  it('differs when the scene text changes for the same chapter', () => {
+    const a = deriveImageSeed('book1', 'illustration', 'chapter-0', 'Victoria opens the gate');
+    const b = deriveImageSeed('book1', 'illustration', 'chapter-0', 'Victoria climbs the oak tree');
+    expect(a).not.toBe(b);
+  });
+
+  it('stays inside the backends seed range and tolerates missing parts', () => {
+    const seed = deriveImageSeed('book1', 'illustration', undefined, 'a scene');
+    expect(seed).toBeGreaterThanOrEqual(0);
+    expect(seed).toBeLessThan(2147483647);
   });
 });
 

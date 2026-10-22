@@ -436,25 +436,31 @@ export async function generateChapter(bookId: string, ownerId: string, jobId: st
     // Handle Illustrations
     if (isChildrenBook && !isColoringBook) {
       try {
+        // The cast is needed by BOTH the brief writer (so it names the right
+        // characters and states what each one is) and the illustrator call
+        // (recurring-cast note), so resolve it before either.
+        const characterNames: string[] = Array.isArray(book.characterNames)
+          ? (book.characterNames as string[]).filter((n): n is string => typeof n === 'string' && n.trim().length > 0)
+          : [];
+
         // Build the scene from the ACTUAL generated chapter prose — not the
         // outline synopsis written before the chapter existed — so the artwork
         // matches what the page literally says.
-        const sceneBrief = await buildIllustrationBrief(chapterResult.content, chapter.title ?? '', targetAudience);
+        const sceneBrief = await buildIllustrationBrief(
+          chapterResult.content,
+          chapter.title ?? '',
+          targetAudience,
+          characterNames.length > 0 ? characterNames.slice(0, 4) : undefined
+        );
 
-        // Light age tuning on top of the scene; the Pixar style anchor itself is
-        // prepended by generateImage so it leads the prompt.
+        // Light age tuning on top of the scene; generateImage frames it with a
+        // short Pixar style tag up front and the full render vocabulary last.
         let scenePrompt = sceneBrief;
         if (targetAudience === '0-5') {
           scenePrompt = `${sceneBrief}. Simple bold shapes, bright cheerful colors, uncluttered scene a toddler can read at a glance.`;
         } else {
           scenePrompt = `${sceneBrief}. Clear storybook composition around one focal moment, warm and friendly, age-appropriate.`;
         }
-
-        // For children's books, use pixar style (full color) instead of lineart
-        // This provides full-color illustrations that represent the content
-        const characterNames: string[] = Array.isArray(book.characterNames)
-          ? (book.characterNames as string[]).filter((n): n is string => typeof n === 'string' && n.trim().length > 0)
-          : [];
         const illustration = await generateChapterIllustration(
           bookId,
           ownerId,
