@@ -52,6 +52,21 @@ export const ILLUSTRATION_NEGATIVE_PROMPT = [
   'extra fingers',
   'fused fingers',
   'mutated hands',
+  // Cast-integrity guard: the recurring failure mode of multi-character
+  // scenes is a second dog, a bonus sibling, a cloned heroine, or animal
+  // features (ears, tail, fur) bleeding onto the human child. The positive
+  // prompt states the exact census; these terms push back from the other side.
+  'duplicate character',
+  'duplicated character',
+  'twins',
+  'clone',
+  'extra child',
+  'extra person',
+  'extra animal',
+  'crowd',
+  'human animal hybrid',
+  'animal ears on human',
+  'tail on human',
   'blurry',
   'low quality',
   'jpeg artifacts',

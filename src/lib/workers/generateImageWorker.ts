@@ -5,6 +5,7 @@ import { db } from '@/lib/db';
 import { jobQueue } from '@/lib/workers/queue';
 import { generateBookCover, generateChapterIllustration, generateColoringPage } from '@/lib/services/imageService';
 import { buildIllustrationBrief } from '@/lib/services/illustrationBrief';
+import { ensureCharacterSheet } from '@/lib/services/characterSheet';
 import { AUDIENCE_CONFIG, type ColoringTheme, type TargetAudience } from '@/types';
 
 export async function generateImageWorker(jobId: string, assetParams: {
@@ -26,9 +27,15 @@ export async function generateImageWorker(jobId: string, assetParams: {
 
     if (type === 'cover') {
       // Look up the actual book title rather than passing the hardcoded placeholder
-      const bookRecord = await db.book.findUnique({ where: { id: bookId }, select: { title: true } });
+      const bookRecord = await db.book.findUnique({ where: { id: bookId }, select: { title: true, description: true, targetAudience: true } });
       const bookTitle = bookRecord?.title || 'Untitled';
-      result = await generateBookCover(bookId, ownerId, bookTitle, genre || 'fiction', targetAudience || 'adult', coloringTheme);
+      // A regenerated cover must show the same frozen cast as the chapter
+      // art, not a fresh set of strangers.
+      const coverSheet = await ensureCharacterSheet(bookId);
+      result = await generateBookCover(bookId, ownerId, bookTitle, genre || 'fiction', targetAudience || bookRecord?.targetAudience || 'adult', coloringTheme, {
+        sheet: coverSheet.length > 0 ? coverSheet : undefined,
+        description: bookRecord?.description,
+      });
     } else if (type === 'coloring_page') {
       if (chapterIndex === undefined) throw new Error('chapterIndex is required for coloring pages');
       // The synopsis is the art-director's visual brief for a coloring page; the
@@ -43,31 +50,26 @@ export async function generateImageWorker(jobId: string, assetParams: {
       // of falling back to a generic "cinematic scene".
       let targetPrompt = prompt?.trim();
       const chapter = await db.chapter.findFirst({ where: { bookId, index: chapterIndex || 0 } });
-      // The cast lives on the book, not the chapter. The brief writer needs it
-      // (to name the right characters and say what each one is) just as much
-      // as the illustrator call does, so load it before both.
-      const bookRecord = await db.book.findUnique({
-        where: { id: bookId },
-        select: { characterNames: true },
-      });
-      const characterNames = Array.isArray(bookRecord?.characterNames)
-        ? (bookRecord!.characterNames as unknown[])
-            .filter((n): n is string => typeof n === 'string' && n.trim().length > 0)
-            .slice(0, 4)
-        : undefined;
+      // The frozen character sheet lives on the book. The brief writer needs
+      // it (to copy each character's canonical look word for word) just as
+      // much as the illustrator call does (anchoring + exact-count clause),
+      // so resolve it before both — a regenerated page must match the cast
+      // the rest of the book already shows.
+      const sheet = await ensureCharacterSheet(bookId, chapter?.content);
+      const sheetArg = sheet.length > 0 ? sheet : undefined;
       if (!targetPrompt && chapter?.content?.trim()) {
         targetPrompt = await buildIllustrationBrief(
           chapter.content,
           chapter.title ?? '',
           targetAudience || '6-9',
-          characterNames
+          sheetArg
         );
       }
       if (!targetPrompt) {
         targetPrompt = 'A cinematic scene from the story';
       }
       const style = targetAudience ? AUDIENCE_CONFIG[targetAudience as TargetAudience]?.illustrationStyle || 'pixar' : 'pixar';
-      result = await generateChapterIllustration(bookId, ownerId, chapterIndex || 0, targetPrompt, style, characterNames);
+      result = await generateChapterIllustration(bookId, ownerId, chapterIndex || 0, targetPrompt, style, sheetArg);
       // Store the EXACT prompt the backend received (style tag + scene +
       // render vocabulary), not just the brief — that is what "what did the
       // artist actually get?" has to answer when a picture misses the page.

@@ -95,6 +95,12 @@ describe('buildNegativePrompt', () => {
     expect(negative).toMatch(/anime/);
     expect(negative).toMatch(/2d cartoon/);
     expect(negative).toMatch(/text/);
+    // Cast integrity: no second dog, no bonus sibling, no animal features
+    // bleeding onto the human child.
+    expect(negative).toMatch(/duplicate character/);
+    expect(negative).toMatch(/twins/);
+    expect(negative).toMatch(/extra child/);
+    expect(negative).toMatch(/animal ears on human/);
   });
 
   it('pushes line art away from colour instead', () => {

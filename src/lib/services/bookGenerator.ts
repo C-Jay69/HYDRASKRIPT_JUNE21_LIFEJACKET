@@ -7,6 +7,7 @@ import { getOutlinePrompt, getOutlineUserPrompt, getChapterWritePrompt, getChapt
 import { BookOutlineSchema, validateOrThrow } from '@/lib/llm/schema';
 import { generateBookCover, generateChapterIllustration, generateColoringPage } from '@/lib/services/imageService';
 import { buildIllustrationBrief } from '@/lib/services/illustrationBrief';
+import { ensureCharacterSheet } from '@/lib/services/characterSheet';
 import { getStyleSystemPrompt } from '@/lib/services/styleAnalyzer';
 import { assembleBooksManuscript, enqueueEditorialReview } from '@/lib/services/editorialReview';
 import { extractEntitiesFromManuscript } from '@/lib/story-bible-extraction';
@@ -436,12 +437,14 @@ export async function generateChapter(bookId: string, ownerId: string, jobId: st
     // Handle Illustrations
     if (isChildrenBook && !isColoringBook) {
       try {
-        // The cast is needed by BOTH the brief writer (so it names the right
-        // characters and states what each one is) and the illustrator call
-        // (recurring-cast note), so resolve it before either.
-        const characterNames: string[] = Array.isArray(book.characterNames)
-          ? (book.characterNames as string[]).filter((n): n is string => typeof n === 'string' && n.trim().length > 0)
-          : [];
+        // The canonical character sheet is needed by BOTH the brief writer
+        // (it copies the frozen appearance descriptions word for word) and
+        // the illustrator call (deterministic anchoring + exact-count
+        // clause), so resolve it before either. It is extracted once — from
+        // the book setup plus the first prose available — frozen on the
+        // book, and reused verbatim for every later chapter and the cover,
+        // which is what keeps the cast identical from page to page.
+        const sheet = await ensureCharacterSheet(bookId, chapterResult.content);
 
         // Build the scene from the ACTUAL generated chapter prose — not the
         // outline synopsis written before the chapter existed — so the artwork
@@ -450,7 +453,7 @@ export async function generateChapter(bookId: string, ownerId: string, jobId: st
           chapterResult.content,
           chapter.title ?? '',
           targetAudience,
-          characterNames.length > 0 ? characterNames.slice(0, 4) : undefined
+          sheet.length > 0 ? sheet : undefined
         );
 
         // Light age tuning on top of the scene; generateImage frames it with a
@@ -467,12 +470,20 @@ export async function generateChapter(bookId: string, ownerId: string, jobId: st
           chapterIndex,
           scenePrompt,
           'pixar',
-          characterNames.length > 0 ? characterNames.slice(0, 4) : undefined
+          sheet.length > 0 ? sheet : undefined
         );
         if (illustration.success && illustration.publicUrl) {
           // Store the exact prompt the backend received (style anchor + scene),
           // so the artwork can always be traced back to the brief that made it.
           await db.chapter.update({ where: { id: chapter.id }, data: { illustrationUrl: illustration.publicUrl, illustrationPrompt: illustration.prompt ?? scenePrompt } });
+          // The first chapter's artwork becomes the book's visual identity
+          // reference (the home for a future image-reference pass); record it
+          // once, never overwrite an identity that is already approved.
+          if (chapterIndex === 0 && !book.visualIdentityUrl) {
+            await db.book
+              .update({ where: { id: bookId }, data: { visualIdentityUrl: illustration.publicUrl } })
+              .catch(() => undefined);
+          }
         } else {
           console.error(`[Illustration] Generation failed for chapter ${chapterIndex + 1} (book ${bookId}): ${illustration.error ?? 'no URL returned'}`);
         }
@@ -677,7 +688,14 @@ export async function finalizeBook(bookId: string, ownerId: string, jobId: strin
     // Cover Art
     if (isChildrenBook || isColoringBook || !book.coverImageUrl) {
       await jobQueue.updateJobStatus(jobId, { progressMessage: 'Creating cover art...', progressPercent: 50 });
-      const coverResult = await generateBookCover(bookId, ownerId, book.title, genre, targetAudience, coloringTheme);
+      // The cover features the book's actual cast in their frozen looks, so
+      // it needs the same canonical sheet the chapter art used (built here
+      // if chapter illustration somehow never ran).
+      const coverSheet = isChildrenBook && !isColoringBook ? await ensureCharacterSheet(bookId) : [];
+      const coverResult = await generateBookCover(bookId, ownerId, book.title, genre, targetAudience, coloringTheme, {
+        sheet: coverSheet.length > 0 ? coverSheet : undefined,
+        description: book.description,
+      });
       if (coverResult.success && coverResult.publicUrl) {
         await db.book.update({ where: { id: bookId }, data: { coverImageUrl: coverResult.publicUrl } });
       } else {

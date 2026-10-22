@@ -13,6 +13,17 @@
 // sentences instead of the first ones.
 
 import { askLLMWithFallback } from '@/lib/llm/fallback';
+// Type-only: characterSheet.ts value-imports helpers from this module, so
+// the runtime dependency must stay one-directional (characterSheet → here).
+import type { CharacterSheet } from '@/lib/services/characterSheet';
+
+/** The frozen cast as the brief writer sees it: copy these words, invent nothing. */
+function formatSheetForBrief(sheet: CharacterSheet): string {
+  const lines = sheet.map((entry) =>
+    entry.descriptor.trim() ? `- ${entry.name} — ${entry.descriptor.trim()}` : `- ${entry.name}`
+  );
+  return `CANONICAL CHARACTER SHEET — the first time you mention a character, copy their appearance description from here WORD FOR WORD. Never change, shorten, recolour or invent appearance details:\n${lines.join('\n')}`;
+}
 
 /** Words that describe a concrete, drawable action. */
 const ACTION_VERBS =
@@ -181,28 +192,35 @@ export async function buildIllustrationBrief(
   content: string,
   chapterTitle: string,
   targetAudience: string,
-  characterNames?: string[]
+  sheet?: CharacterSheet
 ): Promise<string> {
   const excerpt = selectChapterExcerpt(content);
   const ageLine =
     targetAudience === '0-5'
       ? 'Keep the scene very simple: one clear action, one setting, minimal props.'
       : 'Keep the scene focused: one clear focal moment.';
-  const cast = (characterNames ?? []).filter((n) => n.trim().length > 0).slice(0, 4);
-  const castLine = cast.length > 0 ? `\nSeries characters: ${cast.join(', ')}.` : '';
+  // The frozen character sheet replaces the old bare cast list: names alone
+  // forced the brief writer to re-invent every look from each chapter's
+  // prose, which is exactly how the cast drifted between pages.
+  const cast = (sheet ?? []).filter((e) => e.name.trim().length > 0).slice(0, 5);
+  const sheetBlock = cast.length > 0 ? `\n\n${formatSheetForBrief(cast)}` : '';
 
   const systemPrompt = `You are the art-brief writer for a children's picture book. Given a finished chapter, pick the single most important, most visual moment and describe it as ONE scene for an illustrator (40-70 words).
 
 Rules:
 - Say who is in the scene (use their names and describe their look — hair, clothing, colors), what they are doing, and where they are.
 - For EVERY character, state plainly WHAT they are, not just their name: "Victoria, a girl about seven with curly red hair…", "Biscuit, a fluffy brown puppy…". The illustrator has never met these characters — a bare name tells them nothing, and a pet described by name alone will be drawn as the wrong animal.
+- If a CANONICAL CHARACTER SHEET is provided, copy each character's appearance description from it WORD FOR WORD the first time you mention them. Never change, shorten, recolour or add to a sheet look — the identical words are used on every page of the book so the character never changes. What a character is DOING comes from this chapter; what they LOOK like comes only from the sheet.
 - Only include characters who actually appear in this chapter, exactly as the text describes them (species, age, outfit). Never swap one animal for another.
+- If a series character takes part in the moment you chose, put them in the scene. Never drop a character who is acting in that moment — a father holding the ladder or carrying the picnic basket belongs in the picture.
+- Each character appears exactly once. Never add extra children, adults, animals, siblings, twins or bystanders who are not in the text.
+- Human characters are completely normal humans: never give them animal ears, fur, a tail, a snout or paws. Only animal characters have those features.
 - The moment MUST be something that actually happens in this chapter text — never invent a scene that is not there.
 - Write only what a camera could see: visible actions, visible objects, visible setting. No feelings, no thoughts, no backstory.
 - Present tense, concrete visual details only. ${ageLine}
 
 Describe ONLY the scene itself. Never mention "illustration", "picture", "art", "style", "3D", "render", "image", or camera/photography terms. Output only the scene description, no preamble.`;
-  const userPrompt = `Chapter title: "${chapterTitle}"${castLine}\n\nChapter text:\n${excerpt}`;
+  const userPrompt = `Chapter title: "${chapterTitle}"${sheetBlock}\n\nChapter text:\n${excerpt}`;
 
   try {
     const briefCall = askLLMWithFallback(systemPrompt, userPrompt, 0.4, 220);
