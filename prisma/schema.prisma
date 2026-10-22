@@ -83,6 +83,7 @@ model Book {
   totalCreditsEstimated Int      @default(0)
   totalCreditsCharged   Int      @default(0)
   visualIdentityUrl     String? // URL to the approved character reference sheet
+  characterSheet        String? // JSON: canonical character appearances [{name, countNoun, isAnimal, descriptor}] — extracted once, copied verbatim into every illustration prompt and the cover so the cast looks identical on every page
   coloringTheme         String? // For coloring books: mandalas, undersea-creatures, birds, etc.
   adventureType         String? // For kids books: farm, school, fair, boat, forest, beach, space, zoo, castle, city
   chapterCount          Int?     // Number of chapters for this book

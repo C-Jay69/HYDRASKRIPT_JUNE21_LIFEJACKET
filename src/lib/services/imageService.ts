@@ -12,6 +12,8 @@ import {
   type ImageBackend,
 } from '@/lib/services/imagePrompts';
 import type { ColoringTheme, TargetAudience } from '@/types';
+import type { CharacterSheet } from '@/lib/services/characterSheet';
+import { anchorSceneWithSheet, buildChildrenCoverScene, buildExactCountClause } from '@/lib/services/characterSheet';
 
 type ImageSize = '1024x1024' | '768x1344' | '864x1152' | '1344x768' | '1152x864' | '1440x720' | '720x1440';
 
@@ -1152,8 +1154,13 @@ export async function generateImage(options: GenerateImageOptions): Promise<Gene
 
 /**
  * Generate a book cover based on genre, audience, and theme.
+ *
+ * For children's books the cover is built from the book itself — the frozen
+ * character sheet (the real cast in their canonical looks) plus the book's
+ * own description — never the old genre-only template, which named nobody
+ * and so put invented stranger children on every cover.
  */
-export async function generateBookCover(bookId: string, ownerId: string, bookTitle: string, genre: string, targetAudience: string, coloringTheme?: string | null): Promise<GeneratedImageResult> {
+export async function generateBookCover(bookId: string, ownerId: string, bookTitle: string, genre: string, targetAudience: string, coloringTheme?: string | null, coverContext?: { sheet?: CharacterSheet; description?: string | null }): Promise<GeneratedImageResult> {
   const isChildrenBook = ['0-5', '6-9', '10-14'].includes(targetAudience);
   const isColoringBook = genre === 'coloring';
   const style = isColoringBook
@@ -1165,9 +1172,12 @@ export async function generateBookCover(bookId: string, ownerId: string, bookTit
     const themeConfig = COLORING_THEMES[coloringTheme as ColoringTheme];
     coverPrompt = `${themeConfig.coverPrompt}. Book title: "${bookTitle}". Pure black and white line art, no shading.`;
   } else if (isChildrenBook) {
-    coverPrompt = `Children's book cover for "${bookTitle}". ${genre} genre. Bright, colorful, inviting, no text.`;
+    coverPrompt = buildChildrenCoverScene(bookTitle, genre, coverContext?.sheet, coverContext?.description);
   } else {
-    coverPrompt = `Professional book cover for "${bookTitle}". ${genre} genre. Cinematic, elegant, no text.`;
+    const premise = (coverContext?.description ?? '').replace(/\s+/g, ' ').trim().slice(0, 220);
+    coverPrompt = premise
+      ? `Professional book cover for "${bookTitle}". ${premise} Cinematic, elegant, no text.`
+      : `Professional book cover for "${bookTitle}". ${genre} genre. Cinematic, elegant, no text.`;
   }
 
   return generateImage({ prompt: coverPrompt, style, size: '1344x768', ownerId, bookId, assetType: 'cover', seedSalt: 'cover' });
@@ -1176,23 +1186,28 @@ export async function generateBookCover(bookId: string, ownerId: string, bookTit
 /**
  * Generate a chapter illustration with character consistency support.
  */
-export async function generateChapterIllustration(bookId: string, ownerId: string, chapterIndex: number, illustrationPrompt: string, style: string = 'pixar', characterNames?: string[]): Promise<GeneratedImageResult> {
-  // Character Consistency Logic: anchor recurring characters to a stable look
-  // so the cast doesn't redraw itself between chapters.
+export async function generateChapterIllustration(bookId: string, ownerId: string, chapterIndex: number, illustrationPrompt: string, style: string = 'pixar', sheet?: CharacterSheet): Promise<GeneratedImageResult> {
+  // Character Consistency Logic: anchor recurring characters to their frozen
+  // character-sheet looks so the cast doesn't redraw itself between chapters.
   //
-  // The consistency note goes AFTER the scene, not before it. Leading with an
-  // instruction ("Series character consistency: …") pushed the actual picture
-  // description into the middle of the prompt, where image models weight it
-  // least — the scene is what makes the artwork match the page.
+  // The previous approach appended a bare cast list ("Recurring characters
+  // in this series: Victoria, Biscuit — keep them consistent…"). That backfired
+  // twice over: models read a repeated name as a SECOND character to draw
+  // (two dogs, bonus children), and a name with no appearance words anchors
+  // nothing. The sheet approach puts the consistency inside the scene
+  // instead: every named character carries their canonical descriptor as an
+  // appositive at first mention, and an exact-count clause states the census
+  // ("exactly one girl and exactly one puppy…") plus which being owns the
+  // fur, ears and tail. Anchoring here — at the last moment before the
+  // backend call — also rescues heuristic fallback briefs, which quote raw
+  // chapter sentences with bare names and no appearance words at all.
   let finalPrompt = illustrationPrompt;
-  if (characterNames && characterNames.length > 0) {
-    // Name the WHOLE recurring cast, not just the first name — the old note
-    // anchored the hero and left every companion (usually the animal sidekick)
-    // for the model to invent. The brief itself must still say what each
-    // character IS ("Biscuit, a fluffy brown puppy"); this note only reinforces
-    // that these exact recurring characters belong in the picture.
-    const cast = characterNames.slice(0, 4).join(', ');
-    finalPrompt = `${illustrationPrompt} Recurring characters in this series: ${cast} — keep their faces, hairstyles, outfits, fur and colour palettes consistent with the description above.`;
+  if (sheet && sheet.length > 0) {
+    finalPrompt = anchorSceneWithSheet(finalPrompt, sheet);
+    const countClause = buildExactCountClause(finalPrompt, sheet);
+    if (countClause) {
+      finalPrompt = `${finalPrompt} ${countClause}`;
+    }
   }
 
   // For children's books, ensure we're generating full-color illustrations

@@ -148,13 +148,30 @@ describe('buildIllustrationBrief', () => {
     expect(brief).toMatch(/kite|climbed|trunk|branches|soared/);
   });
 
-  it('hands the brief writer the series cast', async () => {
+  it('hands the brief writer the canonical character sheet', async () => {
     mockAskLLM.mockResolvedValue('Maya pulls the kite free from the oak tree branches.');
+    const sheet = [
+      { name: 'Maya', countNoun: 'girl', isAnimal: false, descriptor: 'a girl about eight with dark curly hair in a yellow raincoat' },
+      { name: 'Biscuit', countNoun: 'puppy', isAnimal: true, descriptor: 'a small fluffy brown puppy with floppy ears' },
+    ];
 
-    await buildIllustrationBrief(CHAPTER, 'The Kite', '6-9', ['Maya', 'Biscuit']);
+    await buildIllustrationBrief(CHAPTER, 'The Kite', '6-9', sheet);
 
     const userPrompt = mockAskLLM.mock.calls[0][1];
-    expect(userPrompt).toContain('Series characters: Maya, Biscuit');
+    expect(userPrompt).toContain('CANONICAL CHARACTER SHEET');
+    expect(userPrompt).toContain('Maya — a girl about eight with dark curly hair in a yellow raincoat');
+    expect(userPrompt).toContain('Biscuit — a small fluffy brown puppy with floppy ears');
+  });
+
+  it('forbids the brief writer from re-inventing looks or adding characters', async () => {
+    mockAskLLM.mockResolvedValue('Maya pulls the kite free from the oak tree branches.');
+
+    await buildIllustrationBrief(CHAPTER, 'The Kite', '6-9');
+
+    const systemPrompt = mockAskLLM.mock.calls[0][0];
+    expect(systemPrompt).toMatch(/WORD FOR WORD/i);
+    expect(systemPrompt).toMatch(/exactly once/i);
+    expect(systemPrompt).toMatch(/never give them animal ears/i);
   });
 
   it('tells the brief writer to state what every character is, not just their name', async () => {
@@ -177,7 +194,10 @@ describe('buildIllustrationBrief', () => {
       'A tiny kitten with huge eyes sits alone in a sunny meadow, batting at a butterfly with one small paw.'
     );
 
-    const brief = await buildIllustrationBrief(dogChapter, 'The Great Meadow Race', '0-5', ['Victoria', 'Biscuit']);
+    const brief = await buildIllustrationBrief(dogChapter, 'The Great Meadow Race', '0-5', [
+      { name: 'Victoria', countNoun: 'girl', isAnimal: false, descriptor: 'a girl about seven with curly red hair in yellow overalls and red boots' },
+      { name: 'Biscuit', countNoun: 'puppy', isAnimal: true, descriptor: 'a fluffy brown puppy' },
+    ]);
 
     expect(brief).not.toMatch(/kitten/i);
     expect(brief).toMatch(/Biscuit|puppy|Victoria/);
@@ -190,7 +210,10 @@ describe('buildIllustrationBrief', () => {
       'Victoria, a girl with curly red hair in yellow overalls and red boots, runs laughing beside Biscuit, a fluffy brown puppy, through a wildflower meadow.'
     );
 
-    const brief = await buildIllustrationBrief(dogChapter, 'The Great Meadow Race', '0-5', ['Victoria', 'Biscuit']);
+    const brief = await buildIllustrationBrief(dogChapter, 'The Great Meadow Race', '0-5', [
+      { name: 'Victoria', countNoun: 'girl', isAnimal: false, descriptor: 'a girl with curly red hair in yellow overalls and red boots' },
+      { name: 'Biscuit', countNoun: 'puppy', isAnimal: true, descriptor: 'a fluffy brown puppy' },
+    ]);
 
     expect(brief).toContain('fluffy brown puppy');
   });
