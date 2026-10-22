@@ -607,7 +607,10 @@ export async function buildCharacterSheet(opts: {
 
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeoutCall = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error('Character sheet extraction timed out')), 45_000);
+      // 30s: hint-derived fallback sheets are strong now, so a hung
+      // free-tier provider should not hold the chapter (and the 300s
+      // serverless invocation it rides in) hostage.
+      timer = setTimeout(() => reject(new Error('Character sheet extraction timed out')), 30_000);
     });
 
     try {

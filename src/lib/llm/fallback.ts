@@ -54,16 +54,18 @@ const NIM_PROSE_CHAIN = [
 ].filter((m) => !m || isValidNimModel(m));
 
 // OpenRouter free-tier model chains (these rotate as free models get rate-limited).
+// `nvidia/nemotron-3-super-120b-a12b:free` was removed Oct 2026: it 404s on
+// every call, so as the head of both chains it burned an attempt (and several
+// seconds) on every single LLM call in production. The NIM chains above use
+// the non-:free id against NVIDIA's own endpoint, which is a different route.
 const OPENROUTER_JSON_CHAIN = [
   process.env.OPENROUTER_MODEL_JSON,
-  'nvidia/nemotron-3-super-120b-a12b:free',
   'google/gemma-4-31b-it:free',
   'google/gemma-4-26b-a4b-it:free',
 ];
 
 const OPENROUTER_PROSE_CHAIN = [
   process.env.OPENROUTER_MODEL,
-  'nvidia/nemotron-3-super-120b-a12b:free',
   'google/gemma-4-31b-it:free',
   'google/gemma-4-26b-a4b-it:free',
 ];
