@@ -13,7 +13,7 @@ import {
 } from '@/lib/services/imagePrompts';
 import type { ColoringTheme, TargetAudience } from '@/types';
 import type { CharacterSheet } from '@/lib/services/characterSheet';
-import { anchorSceneWithSheet, buildChildrenCoverScene, buildExactCountClause } from '@/lib/services/characterSheet';
+import { applyCharacterSheetToScene, buildChildrenCoverScene } from '@/lib/services/characterSheet';
 
 type ImageSize = '1024x1024' | '768x1344' | '864x1152' | '1344x768' | '1152x864' | '1440x720' | '720x1440';
 
@@ -1201,13 +1201,13 @@ export async function generateChapterIllustration(bookId: string, ownerId: strin
   // fur, ears and tail. Anchoring here — at the last moment before the
   // backend call — also rescues heuristic fallback briefs, which quote raw
   // chapter sentences with bare names and no appearance words at all.
+  // applyCharacterSheetToScene orders it as: census FIRST (a census appended
+  // after a long scene falls outside Flux's early token window and the
+  // second dog walks straight through), then the anchored scene, then the
+  // human/animal feature separation.
   let finalPrompt = illustrationPrompt;
   if (sheet && sheet.length > 0) {
-    finalPrompt = anchorSceneWithSheet(finalPrompt, sheet);
-    const countClause = buildExactCountClause(finalPrompt, sheet);
-    if (countClause) {
-      finalPrompt = `${finalPrompt} ${countClause}`;
-    }
+    finalPrompt = applyCharacterSheetToScene(finalPrompt, sheet);
   }
 
   // For children's books, ensure we're generating full-color illustrations
