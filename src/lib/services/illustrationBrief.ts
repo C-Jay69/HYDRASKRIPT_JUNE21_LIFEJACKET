@@ -231,7 +231,11 @@ Describe ONLY the scene itself. Never mention "illustration", "picture", "art", 
 
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeoutCall = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error('Illustration brief timed out')), 60_000);
+      // 30s, not 60: the heuristic fallback + sheet anchoring produce a
+      // usable scene without the LLM, so waiting on a dying free-tier
+      // provider only inflates per-chapter latency (and feeds the 300s
+      // serverless cap when chapters chain inside one invocation).
+      timer = setTimeout(() => reject(new Error('Illustration brief timed out')), 30_000);
     });
 
     try {
@@ -252,7 +256,7 @@ Describe ONLY the scene itself. Never mention "illustration", "picture", "art", 
         console.warn(`[Illustration] Visual brief too short (${cleaned.length} chars), using heuristic excerpt`);
       }
     } finally {
-      // Always clear the timer: a pending 60s timer keeps the event loop (and
+      // Always clear the timer: a pending 30s timer keeps the event loop (and
       // a serverless invocation) alive long after the brief is done.
       if (timer) clearTimeout(timer);
     }

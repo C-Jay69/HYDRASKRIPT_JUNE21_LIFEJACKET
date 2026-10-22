@@ -13,7 +13,8 @@ import {
 } from '@/lib/services/imagePrompts';
 import type { ColoringTheme, TargetAudience } from '@/types';
 import type { CharacterSheet } from '@/lib/services/characterSheet';
-import { applyCharacterSheetToScene, buildChildrenCoverScene } from '@/lib/services/characterSheet';
+import { applyCharacterSheetToScene, buildChildrenCoverScene, presentInScene } from '@/lib/services/characterSheet';
+import { verifyIllustration } from '@/lib/services/imageQA';
 
 type ImageSize = '1024x1024' | '768x1344' | '864x1152' | '1344x768' | '1152x864' | '1440x720' | '720x1440';
 
@@ -491,22 +492,27 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
     // and converge on the same subject. Retries shift the seed so a rejected
     // frame is not simply re-drawn.
     const baseSeed = deriveImageSeed(options.bookId ?? options.ownerId, options.assetType, options.seedSalt, prompt);
-    // Recovery state for models that reject a field. This MUST live outside
-    // the attempt loop: the body is rebuilt per attempt, so mutating the body
-    // and `continue`-ing (the old code) silently re-added the rejected field
-    // and burned every retry on the same failing request.
-    let dropNegativePrompt = false;
+    // Recovery state for routers/models that reject a field. This MUST live
+    // outside the attempt loop: the body is rebuilt per attempt, so mutating
+    // the body and `continue`-ing (the old code) silently re-added the
+    // rejected field and burned every retry on the same failing request.
+    // stripLevel: 0 = full request, 1 = without negative_prompt/output_format
+    // (neither is in the unified Images API parameter set — they are only
+    // accepted as per-provider passthrough), 2 = bare {model, prompt, n}.
+    // A strict 400 can therefore degrade the request but never silently
+    // disable the whole backend while the chain falls through to Flux.
+    let stripLevel = 0;
     let sizeOverride: string | undefined;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      const bodyPayload: Record<string, unknown> = {
-        model,
-        prompt,
-        size: sizeOverride || options.size || '1024x1024',
-        output_format: 'png',
-        n: 1,
-        seed: (baseSeed + (attempt - 1) * 7919) % 2147483647,
-      };
-      if (options.negativePrompt && !dropNegativePrompt) bodyPayload.negative_prompt = options.negativePrompt;
+      const bodyPayload: Record<string, unknown> = { model, prompt, n: 1 };
+      if (stripLevel < 2) {
+        bodyPayload.size = sizeOverride || options.size || '1024x1024';
+        bodyPayload.seed = (baseSeed + (attempt - 1) * 7919) % 2147483647;
+      }
+      if (stripLevel === 0) {
+        bodyPayload.output_format = 'png';
+        if (options.negativePrompt) bodyPayload.negative_prompt = options.negativePrompt;
+      }
       try {
         console.log(`[imageService] OpenRouter attempt ${attempt}`);
 
@@ -533,13 +539,16 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
           const errorMsg = `OpenRouter API error: ${response.status} ${response.statusText}` +
             (errorData.error?.message ? ` - ${errorData.error.message}` : '');
           console.error('[imageService] OpenRouter API error:', errorMsg);
-          // Not every image model accepts a negative prompt. Drop the field and
-          // retry the same request rather than failing the illustration. The
-          // flag lives outside the loop because the body is rebuilt per attempt.
-          if (!dropNegativePrompt && bodyPayload.negative_prompt && /negative|unknown|unrecognized|invalid/i.test(errorMsg)) {
-            console.warn('[imageService] OpenRouter rejected negative_prompt — retrying without it');
-            dropNegativePrompt = true;
-            continue;
+          // Auth/billing failures will never heal inside a retry loop — fail
+          // fast so the chain falls through immediately (and the log line
+          // says exactly why OpenRouter is being skipped).
+          if (response.status === 401 || response.status === 402) {
+            return {
+              success: false,
+              error: response.status === 402
+                ? 'OpenRouter has insufficient credits for image generation (402). Top up the account or fund another image backend.'
+                : 'OpenRouter rejected the API key (401). Check OPENROUTER_API_KEY.',
+            };
           }
           // Some models only accept a fixed set of canvas sizes; fall back to
           // the nearest supported one that keeps the same orientation.
@@ -547,6 +556,15 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
             const fallbackSize = normalizeOpenRouterSize(String(bodyPayload.size));
             console.warn(`[imageService] OpenRouter rejected size ${bodyPayload.size} — retrying with ${fallbackSize}`);
             sizeOverride = fallbackSize;
+            continue;
+          }
+          // Any other parameter rejection: strip optional fields one level
+          // and retry, down to the bare {model, prompt, n} the unified API
+          // guarantees. Stripping state lives outside the loop because the
+          // body is rebuilt per attempt.
+          if (/negative|unknown|unrecognized|invalid|parameter|field|unsupported/i.test(errorMsg) && stripLevel < 2) {
+            stripLevel += 1;
+            console.warn(`[imageService] OpenRouter rejected a request field — retrying at strip level ${stripLevel}`);
             continue;
           }
           throw new Error(errorMsg);
@@ -1214,7 +1232,46 @@ export async function generateChapterIllustration(bookId: string, ownerId: strin
   // that can be paired with text on 50% of the page
   const effectiveStyle = style;
 
-  return generateImage({ prompt: finalPrompt, style: effectiveStyle, size: '1344x768', ownerId, bookId, assetType: 'illustration', seedSalt: `chapter-${chapterIndex}` });
+  // QA gate: even a perfectly anchored prompt occasionally yields a valid
+  // picture of entirely the wrong thing (production case: a generic
+  // girl-with-animal-friends portrait — bear, dinosaur, tiger — for an
+  // under-the-table search scene). When the sheet names a cast for this
+  // scene, a vision model verifies the frame (right characters, right
+  // species, right scene) and a mismatch re-rolls with a fresh seed, up to
+  // 2 re-rolls. verifyIllustration is fail-open, so a QA outage degrades to
+  // exactly the previous one-shot behaviour. Rejected frames stay in
+  // storage as orphaned media assets; only the accepted URL is returned.
+  const cast = sheet && sheet.length > 0 ? presentInScene(finalPrompt, sheet) : [];
+  const maxFrames = cast.length > 0 ? 3 : 1;
+  let result: GeneratedImageResult | undefined;
+  for (let frame = 0; frame < maxFrames; frame++) {
+    result = await generateImage({
+      prompt: finalPrompt,
+      style: effectiveStyle,
+      size: '1344x768',
+      ownerId,
+      bookId,
+      assetType: 'illustration',
+      seedSalt: frame === 0 ? `chapter-${chapterIndex}` : `chapter-${chapterIndex}-qa${frame}`,
+    });
+    if (!result.success || !result.publicUrl || cast.length === 0) return result;
+
+    const verdict = await verifyIllustration({ imageUrl: result.publicUrl, scene: finalPrompt, cast });
+    if (verdict.accept) {
+      if (verdict.checked && frame > 0) {
+        console.log(`[imageService] Chapter ${chapterIndex + 1} illustration passed QA after ${frame} re-roll(s)`);
+      }
+      return result;
+    }
+    console.warn(
+      `[imageService] Chapter ${chapterIndex + 1} illustration rejected by QA (frame ${frame + 1}/${maxFrames}): ${verdict.reason}`
+    );
+  }
+
+  console.warn(
+    `[imageService] Chapter ${chapterIndex + 1} illustration still failing QA after ${maxFrames} frames — shipping the last frame rather than no art`
+  );
+  return result as GeneratedImageResult;
 }
 
 /**
