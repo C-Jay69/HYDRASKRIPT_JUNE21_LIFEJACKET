@@ -197,7 +197,7 @@ export async function buildIllustrationBrief(
   const excerpt = selectChapterExcerpt(content);
   const ageLine =
     targetAudience === '0-5'
-      ? 'Keep the scene very simple: one clear action, one setting, minimal props.'
+      ? 'Keep the scene very simple: one clear action, one setting, minimal props. Keep small children visibly tiny next to any adult — a toddler reaches only to an adult\'s knee; never draw a young child adult-sized.'
       : 'Keep the scene focused: one clear focal moment.';
   // The frozen character sheet replaces the old bare cast list: names alone
   // forced the brief writer to re-invent every look from each chapter's

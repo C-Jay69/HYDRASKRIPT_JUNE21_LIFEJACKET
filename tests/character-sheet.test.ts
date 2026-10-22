@@ -13,12 +13,15 @@ jest.mock('@/lib/llm/fallback', () => ({
 
 import {
   anchorSceneWithSheet,
+  applyCharacterSheetToScene,
   buildCharacterSheet,
   buildChildrenCoverScene,
   buildExactCountClause,
+  censusParts,
   guessFallbackSheet,
   isCompleteSheet,
   normalizeDescriptor,
+  parseCastEntry,
   parseCharacterSheet,
   parseSheetJson,
   presentInScene,
@@ -326,5 +329,123 @@ describe('buildCharacterSheet', () => {
     const sheet = await buildCharacterSheet({ names: ['Victoria'] });
     expect(mockAskLLM).not.toHaveBeenCalled();
     expect(sheet).toEqual([{ name: 'Victoria', countNoun: 'character', isAnimal: false, descriptor: '' }]);
+  });
+});
+
+// The production cast format that defeated round 1: users type the whole
+// character spec into the name fields, in shouty caps. Every stage keyed off
+// the decorated string, so nothing matched, nothing froze, and the census
+// never fired (books.characterSheet stayed NULL on a live book).
+const DECORATED_CAST = ['VICTORIA (4 YEAR OLD GIRL)', 'DADA (RED HAIRED IRISHMAN)', 'TRUFFLE (BLACK LAB/RETRIEVER)'];
+
+describe('parseCastEntry', () => {
+  it('splits a parenthetical spec into a clean name and the hint', () => {
+    expect(parseCastEntry('VICTORIA (4 YEAR OLD GIRL)')).toEqual({ name: 'Victoria', hint: '4 YEAR OLD GIRL' });
+    expect(parseCastEntry('DADA (RED HAIRED IRISHMAN)')).toEqual({ name: 'Dada', hint: 'RED HAIRED IRISHMAN' });
+  });
+
+  it('title-cases shouted names but leaves normal names untouched', () => {
+    expect(parseCastEntry('TRUFFLE')).toEqual({ name: 'Truffle', hint: '' });
+    expect(parseCastEntry('Biscuit')).toEqual({ name: 'Biscuit', hint: '' });
+    expect(parseCastEntry('Nana Rose')).toEqual({ name: 'Nana Rose', hint: '' });
+  });
+
+  it('splits a spaced dash spec but never a hyphenated name', () => {
+    expect(parseCastEntry('Victoria - 4 year old girl')).toEqual({ name: 'Victoria', hint: '4 year old girl' });
+    expect(parseCastEntry('Anne-Marie')).toEqual({ name: 'Anne-Marie', hint: '' });
+  });
+});
+
+describe('decorated cast entries (the NULL-sheet regression)', () => {
+  beforeEach(() => {
+    mockAskLLM.mockReset();
+  });
+
+  it('the guessed sheet alone is complete enough to freeze from user hints', () => {
+    const sheet = guessFallbackSheet(DECORATED_CAST, 'Victoria steps onto the boat. Dada smiles. Truffle wags his tail.');
+    expect(sheet.map((e) => e.name)).toEqual(['Victoria', 'Dada', 'Truffle']);
+    expect(sheet[0]).toMatchObject({ countNoun: 'girl', isAnimal: false, descriptor: 'a 4 year old girl' });
+    expect(sheet[1]).toMatchObject({ countNoun: 'man', isAnimal: false, descriptor: 'a red haired irishman' });
+    expect(sheet[2]).toMatchObject({ countNoun: 'dog', isAnimal: true, descriptor: 'a black lab/retriever' });
+    expect(isCompleteSheet(sheet)).toBe(true);
+  });
+
+  it('still freezes a hint-based sheet when every LLM is rate-limited', async () => {
+    mockAskLLM.mockRejectedValue(new Error('429 Too Many Requests'));
+
+    const sheet = await buildCharacterSheet({
+      names: DECORATED_CAST,
+      description: 'A little girl, her dada and their dog go on a boat.',
+      sampleProse: 'Look! A big boat. Victoria walks on. Dada walks on. Truffle walks on. Wiggle, waggle, waggle!',
+    });
+
+    expect(sheet.map((e) => e.name)).toEqual(['Victoria', 'Dada', 'Truffle']);
+    expect(isCompleteSheet(sheet)).toBe(true);
+  });
+
+  it('merges clean extraction names onto the decorated cast and passes hints as authoritative', async () => {
+    mockAskLLM.mockResolvedValue(JSON.stringify([
+      { name: 'Victoria', countNoun: 'girl', isAnimal: false, descriptor: 'a tiny 4-year-old girl, only as tall as an adult\'s knee, with brown pigtails in a yellow sundress' },
+      { name: 'Dada', countNoun: 'father', isAnimal: false, descriptor: 'a tall red-haired father with a short beard in a blue shirt' },
+      { name: 'Truffle', countNoun: 'dog', isAnimal: true, descriptor: 'a big black labrador retriever with a red collar' },
+    ]));
+
+    const sheet = await buildCharacterSheet({
+      names: DECORATED_CAST,
+      description: 'A little girl, her dada and their dog go on a boat.',
+      sampleProse: 'Victoria walks on. Dada walks on. Truffle walks on.',
+    });
+
+    expect(sheet.map((e) => e.name)).toEqual(['Victoria', 'Dada', 'Truffle']);
+    expect(sheet[0].descriptor).toContain('4-year-old');
+    const userPrompt = mockAskLLM.mock.calls[0][1];
+    expect(userPrompt).toContain('- Victoria — described by the user as: 4 YEAR OLD GIRL');
+    expect(userPrompt).toContain('- Truffle — described by the user as: BLACK LAB/RETRIEVER');
+  });
+
+  it('anchors ALL-CAPS mentions in toddler-book scenes', () => {
+    const sheet: CharacterSheet = [
+      { name: 'Victoria', countNoun: 'girl', isAnimal: false, descriptor: 'a 4 year old girl' },
+      { name: 'Truffle', countNoun: 'dog', isAnimal: true, descriptor: 'a black lab/retriever' },
+    ];
+    const scene = anchorSceneWithSheet('VICTORIA throws the ball and TRUFFLE jumps into the water with a big splash.', sheet);
+    expect(scene).toContain('VICTORIA, a 4 year old girl, throws');
+    expect(scene).toContain('TRUFFLE, a black lab/retriever, jumps');
+  });
+
+  it('the census finally fires for the decorated-cast book', () => {
+    const sheet = guessFallbackSheet(DECORATED_CAST, 'Victoria walks on. Dada walks on. Truffle walks on.');
+    const clause = buildExactCountClause('Victoria, Dada and Truffle step onto the bright blue boat.', sheet);
+    expect(clause).toContain('exactly one girl');
+    expect(clause).toContain('exactly one man');
+    expect(clause).toContain('exactly one dog');
+    expect(clause).toContain('belong only to the dog');
+  });
+});
+
+describe('applyCharacterSheetToScene', () => {
+  it('leads with the census, then the anchored scene, then feature separation', () => {
+    const out = applyCharacterSheetToScene('Victoria kneels beside Biscuit in the garden.', SHEET);
+    const censusAt = out.indexOf('exactly one girl');
+    const sceneAt = out.indexOf('Victoria, a girl about seven');
+    const separationAt = out.indexOf('belong only to the puppy');
+    expect(censusAt).toBeGreaterThanOrEqual(0);
+    expect(censusAt).toBeLessThan(sceneAt);
+    expect(sceneAt).toBeLessThan(separationAt);
+  });
+
+  it('returns the scene untouched when no sheet character is present', () => {
+    const scene = 'Waves roll onto the quiet shore.';
+    expect(applyCharacterSheetToScene(scene, SHEET)).toBe(scene);
+    expect(applyCharacterSheetToScene(scene, [])).toBe(scene);
+  });
+
+  it('censusParts splits lead and separation, and the combined clause keeps its wording', () => {
+    const scene = 'Victoria kneels beside Biscuit.';
+    const { lead, separation } = censusParts(scene, SHEET);
+    expect(lead).toContain('exactly one girl and exactly one puppy');
+    expect(separation).toContain('belong only to the puppy');
+    expect(buildExactCountClause(scene, SHEET)).toBe(`${lead} ${separation}`);
+    expect(censusParts('Empty beach.', SHEET)).toEqual({ lead: '', separation: '' });
   });
 });
