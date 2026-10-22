@@ -15,6 +15,13 @@ import type { ColoringTheme, TargetAudience } from '@/types';
 import type { CharacterSheet } from '@/lib/services/characterSheet';
 import { applyCharacterSheetToScene, buildChildrenCoverScene, presentInScene } from '@/lib/services/characterSheet';
 import { verifyIllustration } from '@/lib/services/imageQA';
+import {
+  classifySizeError,
+  nearestAspectRatio,
+  parseMinimumPixels,
+  tierIndexForResolution,
+  RESOLUTION_TIERS,
+} from '@/lib/services/openRouterSizing';
 
 type ImageSize = '1024x1024' | '768x1344' | '864x1152' | '1344x768' | '1152x864' | '1440x720' | '720x1440';
 
@@ -455,22 +462,6 @@ async function generateWithGemini(prompt: string, options: GenerateImageOptions)
 }
 
 /**
- * Nearest canvas size the OpenRouter image models reliably accept, keeping the
- * requested orientation. Only used as a retry when the model rejects the size
- * we asked for.
- */
-function normalizeOpenRouterSize(size: string): string {
-  const supported = new Set(['1024x1024', '1024x1536', '1536x1024', '1792x1024', '1024x1792']);
-  if (supported.has(size)) return size;
-  const [w, h] = size.split('x').map((n) => parseInt(n, 10));
-  if (!Number.isFinite(w) || !Number.isFinite(h) || h <= 0) return '1024x1024';
-  const ratio = w / h;
-  if (ratio > 1.05) return '1536x1024';
-  if (ratio < 0.95) return '1024x1536';
-  return '1024x1024';
-}
-
-/**
  * Backend: OpenRouter Images API (POST /api/v1/images).
  * First backup when Pollinations fails. Returns base64 in data[0].b64_json.
  * Model is env-tunable via OPENROUTER_IMAGE_MODEL.
@@ -502,11 +493,22 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
     // A strict 400 can therefore degrade the request but never silently
     // disable the whole backend while the chain falls through to Flux.
     let stripLevel = 0;
-    let sizeOverride: string | undefined;
+    // Sizing goes through the unified aspect_ratio + resolution parameters,
+    // never a raw WxH `size`: Seedream 4.5 (the default model) refuses
+    // outputs under 3,686,400 px, so size:"1344x768" 400'd on every request
+    // and Pollinations silently generated everything even with OpenRouter
+    // first in IMAGE_BACKEND_ORDER. tierIndex walks the resolution ladder
+    // when a model reports a pixel floor/ceiling (see the recovery below);
+    // the starting tier is pinnable via OPENROUTER_IMAGE_RESOLUTION (e.g.
+    // "1K" for per-megapixel-billed models like flux.2).
+    const { width, height } = pollinationsSize(options.size ?? '1024x1024');
+    const aspectRatio = nearestAspectRatio(width, height);
+    let tierIndex = tierIndexForResolution(process.env.OPENROUTER_IMAGE_RESOLUTION);
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       const bodyPayload: Record<string, unknown> = { model, prompt, n: 1 };
       if (stripLevel < 2) {
-        bodyPayload.size = sizeOverride || options.size || '1024x1024';
+        bodyPayload.aspect_ratio = aspectRatio;
+        bodyPayload.resolution = RESOLUTION_TIERS[tierIndex];
         bodyPayload.seed = (baseSeed + (attempt - 1) * 7919) % 2147483647;
       }
       if (stripLevel === 0) {
@@ -550,12 +552,25 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
                 : 'OpenRouter rejected the API key (401). Check OPENROUTER_API_KEY.',
             };
           }
-          // Some models only accept a fixed set of canvas sizes; fall back to
-          // the nearest supported one that keeps the same orientation.
-          if (/size|resolution|aspect|dimension/i.test(errorMsg) && bodyPayload.size !== '1024x1024' && !sizeOverride) {
-            const fallbackSize = normalizeOpenRouterSize(String(bodyPayload.size));
-            console.warn(`[imageService] OpenRouter rejected size ${bodyPayload.size} — retrying with ${fallbackSize}`);
-            sizeOverride = fallbackSize;
+          // Directional size recovery: walk the resolution tier the way the
+          // model asked. A pixel-floor model (Seedream: "requires at least
+          // 3,686,400 output pixels… Use a larger size") goes UP; a
+          // pixel-ceiling model goes DOWN. The old code mapped to a fixed
+          // OpenAI-style pixel size that was still under Seedream's floor,
+          // so the retry failed identically and the backend silently died
+          // while Pollinations generated everything.
+          const sizeDirection = classifySizeError(errorMsg);
+          if (sizeDirection === 'too-small' && tierIndex < RESOLUTION_TIERS.length - 1) {
+            tierIndex += 1;
+            const minPixels = parseMinimumPixels(errorMsg);
+            console.warn(
+              `[imageService] OpenRouter wants a larger canvas${minPixels ? ` (≥${minPixels.toLocaleString()}px)` : ''} — retrying at resolution ${RESOLUTION_TIERS[tierIndex]}`
+            );
+            continue;
+          }
+          if (sizeDirection === 'too-large' && tierIndex > 0) {
+            tierIndex -= 1;
+            console.warn(`[imageService] OpenRouter wants a smaller canvas — retrying at resolution ${RESOLUTION_TIERS[tierIndex]}`);
             continue;
           }
           // Any other parameter rejection: strip optional fields one level
@@ -1243,6 +1258,8 @@ export async function generateChapterIllustration(bookId: string, ownerId: strin
   // storage as orphaned media assets; only the accepted URL is returned.
   const cast = sheet && sheet.length > 0 ? presentInScene(finalPrompt, sheet) : [];
   const maxFrames = cast.length > 0 ? 3 : 1;
+  let qaChecked = 0;
+  let qaRejected = 0;
   let result: GeneratedImageResult | undefined;
   for (let frame = 0; frame < maxFrames; frame++) {
     result = await generateImage({
@@ -1257,17 +1274,26 @@ export async function generateChapterIllustration(bookId: string, ownerId: strin
     if (!result.success || !result.publicUrl || cast.length === 0) return result;
 
     const verdict = await verifyIllustration({ imageUrl: result.publicUrl, scene: finalPrompt, cast });
+    if (verdict.checked) qaChecked += 1;
     if (verdict.accept) {
-      if (verdict.checked && frame > 0) {
-        console.log(`[imageService] Chapter ${chapterIndex + 1} illustration passed QA after ${frame} re-roll(s)`);
-      }
+      // One greppable summary line per chapter. Without it, telling "QA
+      // passed this frame" from "QA never ran" means reconstructing the
+      // whole request from scattered log lines — which is how a fail-open
+      // QA outage once shipped rogue frames through a whole book unnoticed.
+      console.log(
+        `[imageService] Chapter ${chapterIndex + 1} QA summary: frames=${frame + 1} checked=${qaChecked} rejected=${qaRejected} → ${verdict.checked ? 'accepted' : `accepted unchecked (${verdict.reason})`}`
+      );
       return result;
     }
+    qaRejected += 1;
     console.warn(
       `[imageService] Chapter ${chapterIndex + 1} illustration rejected by QA (frame ${frame + 1}/${maxFrames}): ${verdict.reason}`
     );
   }
 
+  console.log(
+    `[imageService] Chapter ${chapterIndex + 1} QA summary: frames=${maxFrames} checked=${qaChecked} rejected=${qaRejected} → shipping last frame`
+  );
   console.warn(
     `[imageService] Chapter ${chapterIndex + 1} illustration still failing QA after ${maxFrames} frames — shipping the last frame rather than no art`
   );

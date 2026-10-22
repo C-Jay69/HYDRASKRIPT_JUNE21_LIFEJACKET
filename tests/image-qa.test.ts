@@ -141,4 +141,27 @@ describe('verifyIllustration', () => {
     expect(result).toMatchObject({ accept: true, checked: false });
     expect(mockFetch).not.toHaveBeenCalled();
   });
+
+  it('asks a paid vision model before the free Gemma', async () => {
+    // Paid judges fail fast (402) on an empty balance; the free Gemma fails
+    // slowly (502/504 storms) — leading with it once left QA silently
+    // unchecked through a whole book.
+    mockFetch.mockResolvedValue(chatResponse('{"match": true, "problems": []}'));
+    const result = await verifyIllustration({ imageUrl: IMAGE_URL, scene: SCENE, cast: CAST });
+    expect(result).toMatchObject({ accept: true, checked: true });
+    const firstBody = JSON.parse((mockFetch.mock.calls[0][1] as { body: string }).body);
+    expect(firstBody.model).toBe('google/gemini-2.5-flash');
+  });
+
+  it('reaches the free Gemma when the paid judges report no credits', async () => {
+    mockFetch
+      .mockResolvedValueOnce(chatResponse('insufficient credits', false, 402))
+      .mockResolvedValueOnce(chatResponse('insufficient credits', false, 402))
+      .mockResolvedValueOnce(chatResponse('{"match": false, "problems": ["an extra boy is present"]}'));
+    const result = await verifyIllustration({ imageUrl: IMAGE_URL, scene: SCENE, cast: CAST });
+    expect(result).toMatchObject({ accept: false, checked: true });
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    const thirdBody = JSON.parse((mockFetch.mock.calls[2][1] as { body: string }).body);
+    expect(thirdBody.model).toBe('google/gemma-4-31b-it:free');
+  });
 });

@@ -41,23 +41,31 @@ function isValidNimModel(model: string): boolean {
 // NVIDIA NIM model chains (prefer the newest, strongest instruction followers).
 // Env vars are validated — a bare name like "mistral-large-2411" (which belongs
 // to the Mistral provider, not NIM) is silently dropped so the chain still works.
+//
+// `google/gemma-4-31b-it` leads over `nvidia/nemotron-3-super-120b-a12b`
+// (demoted Oct 2026): the nemotron id is still the current catalog id on
+// build.nvidia.com, but the deployed NIM route answers it with 404s and empty
+// responses in production logs, so as chain head it taxed every NIM call.
+// It stays in the chain as a fallback for if/when the route recovers, and the
+// env vars can re-pin it first without a code change.
 const NIM_JSON_CHAIN = [
   process.env.NVIDIA_NIM_MODEL_JSON,
-  'nvidia/nemotron-3-super-120b-a12b',
   'google/gemma-4-31b-it',
+  'nvidia/nemotron-3-super-120b-a12b',
 ].filter((m) => !m || isValidNimModel(m));
 
 const NIM_PROSE_CHAIN = [
   process.env.NVIDIA_NIM_MODEL,
-  'nvidia/nemotron-3-super-120b-a12b',
   'google/gemma-4-31b-it',
+  'nvidia/nemotron-3-super-120b-a12b',
 ].filter((m) => !m || isValidNimModel(m));
 
 // OpenRouter free-tier model chains (these rotate as free models get rate-limited).
 // `nvidia/nemotron-3-super-120b-a12b:free` was removed Oct 2026: it 404s on
 // every call, so as the head of both chains it burned an attempt (and several
 // seconds) on every single LLM call in production. The NIM chains above use
-// the non-:free id against NVIDIA's own endpoint, which is a different route.
+// the non-:free id against NVIDIA's own endpoint — a different route, but it
+// 404s there too, hence the demotion described above.
 const OPENROUTER_JSON_CHAIN = [
   process.env.OPENROUTER_MODEL_JSON,
   'google/gemma-4-31b-it:free',
