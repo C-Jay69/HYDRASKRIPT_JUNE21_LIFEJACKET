@@ -4,6 +4,7 @@
 import { db } from '@/lib/db';
 import { jobQueue } from '@/lib/workers/queue';
 import { generateBookCover, generateChapterIllustration, generateColoringPage } from '@/lib/services/imageService';
+import { buildIllustrationBrief } from '@/lib/services/illustrationBrief';
 import { AUDIENCE_CONFIG, type ColoringTheme, type TargetAudience } from '@/types';
 
 export async function generateImageWorker(jobId: string, assetParams: {
@@ -21,6 +22,7 @@ export async function generateImageWorker(jobId: string, assetParams: {
   try {
     await jobQueue.heartbeat(jobId);
     let result;
+    let illustrationPrompt: string | undefined;
 
     if (type === 'cover') {
       // Look up the actual book title rather than passing the hardcoded placeholder
@@ -36,10 +38,34 @@ export async function generateImageWorker(jobId: string, assetParams: {
       const subject = chapter?.synopsis?.trim() || chapter?.content?.trim() || 'A beautiful scene';
       result = await generateColoringPage(bookId, ownerId, chapterIndex, subject, coloringTheme as ColoringTheme | null | undefined);
     } else {
-      // Illustration
-      const targetPrompt = prompt || 'A cinematic scene from the story';
+      // Illustration. An explicit prompt wins; otherwise the scene is derived
+      // from the chapter's own prose so the artwork matches the page instead
+      // of falling back to a generic "cinematic scene".
+      let targetPrompt = prompt?.trim();
+      const chapter = await db.chapter.findFirst({ where: { bookId, index: chapterIndex || 0 } });
+      if (!targetPrompt && chapter?.content?.trim()) {
+        targetPrompt = await buildIllustrationBrief(
+          chapter.content,
+          chapter.title ?? '',
+          targetAudience || '6-9'
+        );
+      }
+      if (!targetPrompt) {
+        targetPrompt = 'A cinematic scene from the story';
+      }
       const style = targetAudience ? AUDIENCE_CONFIG[targetAudience as TargetAudience]?.illustrationStyle || 'pixar' : 'pixar';
-      result = await generateChapterIllustration(bookId, ownerId, chapterIndex || 0, targetPrompt, style);
+      // The cast lives on the book, not the chapter.
+      const bookRecord = await db.book.findUnique({
+        where: { id: bookId },
+        select: { characterNames: true },
+      });
+      const characterNames = Array.isArray(bookRecord?.characterNames)
+        ? (bookRecord!.characterNames as unknown[])
+            .filter((n): n is string => typeof n === 'string' && n.trim().length > 0)
+            .slice(0, 4)
+        : undefined;
+      result = await generateChapterIllustration(bookId, ownerId, chapterIndex || 0, targetPrompt, style, characterNames);
+      illustrationPrompt = targetPrompt;
     }
 
     if (!result.success) {
@@ -57,7 +83,12 @@ export async function generateImageWorker(jobId: string, assetParams: {
       if (chapter) {
         await db.chapter.update({
           where: { id: chapter.id },
-          data: { illustrationUrl: result.publicUrl }
+          // The prompt that produced the art is stored on the chapter so the
+          // artwork can always be traced back to the scene it was drawn from.
+          data: {
+            illustrationUrl: result.publicUrl,
+            ...(illustrationPrompt ? { illustrationPrompt } : {}),
+          }
         });
       }
     }

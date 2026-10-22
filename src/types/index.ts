@@ -165,28 +165,43 @@ export const COLORING_THEMES: Record<ColoringTheme, { label: string; description
 
 // ─── Image Style Config ───────────────────────────────────────────────────────
 
-export const STYLE_CONFIG: Record<string, { prompt: string; size: string }> = {
+/**
+ * `prompt` is the HEAD of every generated prompt (style first — image models
+ * weight the head of a prompt most heavily) and `tail` is repeated at the very
+ * END of the prompt. Weak image models attend most to the head, strong ones to
+ * the tail; repeating the style anchor on both ends is what stops the scene
+ * description from washing the house style out of the result.
+ */
+export const STYLE_CONFIG: Record<string, { prompt: string; size: string; tail?: string }> = {
   pixar: {
     // Lead style anchor — generateImage places this FIRST in the prompt so the
     // image model anchors on the style before reading the scene description.
-    prompt: 'A single frame from a modern Pixar-style 3D animated movie, high-end stylized 3D animation, expressive appealing characters with big friendly eyes, vibrant saturated colors, soft cinematic lighting, cinematic composition, beautifully detailed render',
+    prompt: 'A single frame from a modern Pixar-style 3D animated feature film, stylized 3D character design with rounded appealing proportions, large expressive eyes, soft subsurface-scattering skin and fur, richly detailed environment, vibrant saturated color palette, warm cinematic key light with soft rim lighting, shallow depth of field, high-end physically based render, clean readable storybook composition',
     size: '1344x768',
+    // Closing style anchor — repeated last so the scene description cannot
+    // dilute the look. Also carries the "no text" guard: image models love to
+    // stamp gibberish lettering across a picture-book page.
+    tail: 'Pixar-style 3D animated feature film frame, stylized rounded character design, cinematic lighting, vibrant colors. No text, no lettering, no watermark.',
   },
   lineart: {
     prompt: 'Clean black outline line art on white, thick even strokes, simple shapes, large white areas to color. No shading or color.',
     size: '1024x1024',
+    tail: 'Black outline line art on white, unshaded, uncolored.',
   },
   'lineart-adult': {
     prompt: 'Intricate black contour line art on white, fine even line weight, ornamental detail, white areas to color. No shading or color.',
     size: '1024x1024',
+    tail: 'Black contour line art on white, unshaded, uncolored.',
   },
   watercolor: {
     prompt: 'Delicate watercolor illustration, soft pastel colors, dreamy atmosphere, artistic brush strokes',
     size: '1024x1024',
+    tail: 'Watercolor illustration, soft pastel washes, visible paper texture.',
   },
   realistic: {
     prompt: 'Photorealistic style, dramatic lighting, high detail, professional composition',
     size: '1344x768',
+    tail: 'Photorealistic photograph, natural lighting, sharp focus.',
   },
   // AI Cover Designer presets
   cyberpunk: {

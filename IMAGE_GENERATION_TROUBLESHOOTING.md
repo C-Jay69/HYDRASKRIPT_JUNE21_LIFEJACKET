@@ -1,88 +1,118 @@
 # Image Generation Troubleshooting Guide
 
-## Current Status
-Based on the Vercel logs, we can see that:
-1. **OpenRouter is timing out** with a 504 Gateway Timeout error
-2. **Pruna AI is failing quality gates** repeatedly 
-3. **Pollinations has insufficient balance** for image generation
+## How an illustration is actually produced
 
-## Recommended Solution
+```
+chapter prose
+   └─ buildIllustrationBrief()      → scene brief written from the chapter's own text
+        └─ generateImage()
+             ├─ composeImagePrompt()  → [style anchor] + [scene] + [style anchor]
+             ├─ buildNegativePrompt() → "photo, anime, 2D cartoon, text, …"
+             └─ backend chain         → Pollinations → OpenRouter → Stability → Pruna
+```
 
-### 1. Fix Your Image Generation Backends
+Two things decide whether the artwork looks like a Pixar picture book:
 
-Since you want to prioritize OpenRouter → Pruna → Pollinations, here's what you need to do:
+1. **The prompt.** The style anchor is now placed at *both* ends of the prompt
+   and a negative prompt names every look that competes with it. A model that
+   drifts into a flat 2D cartoon, a photograph or a page of gibberish
+   lettering was almost always told what to avoid nowhere.
+2. **The scene brief.** The brief writer sees the whole chapter (head + tail
+   when it has to be trimmed), and the fallback picks the chapter's most
+   drawable sentences instead of its first two. A brief written from the wrong
+   part of the story is what "the picture does not match the page" looks like.
 
-**Step 1: Fund Your Accounts**
-- **Pruna AI**: Sign up at pruna.ai and add funds
-- **Pollinations**: Top up at enter.pollinations.ai
-- **OpenRouter**: Ensure your API key is valid and has sufficient quota
+## Environment variables
 
-**Step 2: Configure Environment Variables in Vercel**
-Go to your Vercel dashboard → Project Settings → Environment Variables and add:
-- `OPENROUTER_API_KEY` (your OpenRouter API key)
-- `PRUNA_AI_API_KEY` (your Pruna AI API key)  
-- `POLLINATIONS_API_KEY` (your Pollinations API key)
-- `STABILITY_AI_API_KEY` (your Stability AI API key, optional but recommended)
+| Variable | Purpose |
+| --- | --- |
+| `POLLINATIONS_API_KEY` | Pollinations AI (default first backend) |
+| `OPENROUTER_API_KEY` / `OPEN_ROUTER_API_KEY` | OpenRouter Images API |
+| `OPENROUTER_IMAGE_MODEL` | Image model on OpenRouter (default `bytedance-seed/seedream-4.5`) |
+| `POLLINATIONS_MODEL` | Model on Pollinations (default `flux`) |
+| `STABILITY_AI_API_KEY` | Stability AI |
+| `PRUNA_AI_API_KEY` | Pruna AI (`p-image`) |
+| `IMAGE_BACKEND_ORDER` | Comma-separated backend order, e.g. `openrouter,pollinations,stability,pruna` |
 
-### 2. Understanding the Priority Order
+### Choosing a backend order
 
-The updated system now follows this priority:
-1. **OpenRouter** (best quality for children's books)
-2. **Pruna AI** (cost-effective, fast)
-3. **Stability AI** (fallback quality)
-4. **Gemini** (Google's model)
-5. **Pollinations** (last resort)
+The default order is `pollinations → openrouter → stability → pruna`.
 
-### 3. Troubleshooting Specific Issues
+To put OpenRouter's Seedream 4.5 in front — it follows style and scene
+instructions far more literally than Pollinations' flux, which is the quickest
+lever on "the art is not really Pixar" — set:
 
-#### OpenRouter Timeout (504 Gateway Timeout)
-- This suggests the OpenRouter service is temporarily overloaded or your request is taking too long
-- Try reducing the complexity of prompts
-- Ensure your API key has sufficient quota
+```dotenv
+IMAGE_BACKEND_ORDER=openrouter,pollinations,stability,pruna
+```
 
-#### Pruna Quality Gate Failures
-- Pruna is returning images that don't meet quality standards
-- This can happen with certain prompts or when the model generates low-quality outputs
-- Retry logic should handle this automatically
+Any backend you do not list is kept at the end of the chain as a fallback, so
+this can never leave the pipeline without a backend.
 
-#### Pollinations Insufficient Balance
-- You need to add funds to your Pollinations account
-- Visit enter.pollinations.ai to top up your balance
+## Quality gates
 
-### 4. Testing the Fix
+* **Degenerate-image gate** — a flat grey/white wash is rejected and the seed
+  is re-rolled.
+* **Colour gate** (Pixar style only) — a frame that comes back grey or washed
+  out means the style anchor was ignored. It is rejected and re-rolled with a
+  new seed, then handed to the next backend. This is the automated version of
+  "not really Pixar".
+* **Line-art gate** (coloring pages only) — line density must land in the
+  range a real coloring page occupies.
 
-1. After funding your accounts:
-   - Restart your Vercel deployment
-   - Create a new children's book with genre "children" and audience "0-5"
-   - Monitor Vercel logs for successful image generation messages
+## Troubleshooting specific issues
 
-2. Expected successful log output:
-   ```
-   [imageService] Attempting OpenRouter for children's book image
-   [imageService] Attempting OpenRouter with Meta Muse model for children's book
-   [imageService] OpenRouter image generation successful
-   ```
+### OpenRouter timeout (504 Gateway Timeout)
+* The OpenRouter service is overloaded or the request is too slow.
+* Check the key has quota, and watch the request size — a very long prompt
+  makes the model slower.
+* The chain falls through to the next backend automatically.
 
-### 5. Alternative Approach (If You Want to Skip OpenRouter)
+### OpenRouter rejects `negative_prompt`
+Not every image model accepts the field. The service detects the rejection,
+drops the field and retries the same request, so this is handled without any
+configuration.
 
-If you want to bypass OpenRouter entirely and use only Pruna and Pollinations:
+### OpenRouter rejects the requested size
+Some models only accept a fixed set of canvas sizes. The service retries with
+the nearest supported size of the same orientation.
 
-1. Remove the OpenRouter API key from your Vercel environment variables
-2. Or modify the code to skip OpenRouter entirely (but this will reduce quality for children's books)
+### Pruna quality gate failures
+Pruna is returning images that don't meet quality standards. Retry logic
+handles this automatically. Pruna only applies the line-art conversion to
+coloring pages — full-colour illustrations are never converted to outlines.
 
-### 6. Monitoring and Debugging
+### Pollinations insufficient balance
+Top up at enter.pollinations.ai. The service detects the "insufficient
+balance" response and stops burning retries on it.
 
-After implementing fixes, monitor these log messages:
-- `[imageService] generateImage called with: style=pixar, assetType=illustration, bookId=...`
-- `[imageService] isChildrenBookIllustration: true` 
-- `[imageService] Trying OpenRouter as primary backend` (or Pruna/Stability)
-- `[imageService] OpenRouter image generation successful` (or Pruna/Stability success)
+### The artwork does not match the page
+1. Read `chapter.illustrationPrompt` — it stores the exact scene brief that
+   was sent to the artist.
+2. Look for `[Illustration] Using heuristic brief:` in the logs. That means the
+   brief LLM call failed or timed out and the fallback was used.
+3. The brief is derived from the chapter prose, so a stale illustration means a
+   stale chapter — retrying the chapter now also clears the old illustration
+   and regenerates it.
 
-## Quick Checklist
+## Monitoring and debugging
 
-- [ ] Fund Pruna AI account
-- [ ] Fund Pollinations account  
-- [ ] Ensure OpenRouter API key is valid
-- [ ] Add all API keys to Vercel environment variables
-- [ ] Restart Vercel deployment
-- [ ] Test with a new children's book
+Useful log lines:
+
+```
+[imageService] generateImage called with: style=pixar, assetType=illustration, bookId=...
+[imageService] Backend order: OpenRouter Images → Pollinations AI → Pruna AI
+[imageService] Trying OpenRouter Images
+[imageService] OpenRouter Images produced the image
+[imageService] color gate reject: saturation 0.041 < 0.15 (image is washed out / greyscale)
+[Illustration] Visual brief for "The Kite": Maya stands on a wet street holding the red kite…
+```
+
+## Quick checklist
+
+- [ ] Fund the backends you intend to use
+- [ ] Add the API keys to the deployment's environment variables
+- [ ] Optionally set `IMAGE_BACKEND_ORDER` to pick the preferred backend
+- [ ] Redeploy (environment variable changes need a redeploy)
+- [ ] Generate a **new** book — existing chapters keep the illustration and the
+      prompt they were generated with

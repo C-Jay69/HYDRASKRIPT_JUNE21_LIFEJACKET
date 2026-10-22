@@ -6,6 +6,7 @@ import { askLLMJSONWithFallback, askLLMWithFallback } from '@/lib/llm/fallback';
 import { getOutlinePrompt, getOutlineUserPrompt, getChapterWritePrompt, getChapterUserPrompt, getChildrensChapterPrompt, getColoringOutlinePrompt, getColoringOutlineUserPrompt, getColoringChapterPrompt } from '@/lib/llm/prompts';
 import { BookOutlineSchema, validateOrThrow } from '@/lib/llm/schema';
 import { generateBookCover, generateChapterIllustration, generateColoringPage } from '@/lib/services/imageService';
+import { buildIllustrationBrief } from '@/lib/services/illustrationBrief';
 import { getStyleSystemPrompt } from '@/lib/services/styleAnalyzer';
 import { assembleBooksManuscript, enqueueEditorialReview } from '@/lib/services/editorialReview';
 import { extractEntitiesFromManuscript } from '@/lib/story-bible-extraction';
@@ -67,60 +68,10 @@ function cleanChapterText(raw: string, chapterTitle: string): string {
  * Build an illustration brief from the ACTUAL generated chapter prose (not the
  * pre-written outline synopsis) so the artwork depicts what the page says.
  *
- * A cheap, low-token LLM call picks the single most visual moment of the
- * chapter and describes it the way an illustrator needs: who is in the scene
- * (with their look), what they are doing, and where. If the LLM call fails or
- * times out we fall back to the chapter's opening beats so illustration
- * generation never blocks the pipeline.
+ * See `illustrationBrief.ts` for the full rules: the writer sees the whole
+ * chapter, and the fallback picks the chapter's most drawable beats instead
+ * of its first two sentences.
  */
-async function buildIllustrationBrief(
-  content: string,
-  chapterTitle: string,
-  targetAudience: string
-): Promise<string> {
-  const excerpt = content.length > 2800 ? content.slice(0, 2800) : content;
-  const ageLine =
-    targetAudience === '0-5'
-      ? 'Keep the scene very simple: one clear action, one setting, minimal props.'
-      : 'Keep the scene focused: one clear focal moment.';
-
-  const systemPrompt = `You are the art-brief writer for a children's picture book. Given a finished chapter, pick the single most important, most visual moment and describe it as ONE scene for an illustrator (40-70 words).
-
-Say who is in the scene (use their names and describe their look — hair, clothing, colors), what they are doing, and where they are. Present tense, concrete visual details only. ${ageLine}
-
-Describe ONLY the scene itself. Never mention "illustration", "picture", "art", "style", "3D", "Pixar", "render", "image", or camera/photography terms. Output only the scene description, no preamble.`;
-  const userPrompt = `Chapter title: "${chapterTitle}"\n\nChapter text:\n${excerpt}`;
-
-  try {
-    const briefCall = askLLMWithFallback(systemPrompt, userPrompt, 0.4, 220);
-    const timeoutCall = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Illustration brief timed out')), 45_000)
-    );
-    const raw = (await Promise.race([briefCall, timeoutCall])).trim();
-    const cleaned = raw
-      .replace(/^[`"'\s]+|[`"'\s]+$/g, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-    if (cleaned.length >= 30) {
-      console.log(`[Illustration] Visual brief for "${chapterTitle}": ${cleaned.slice(0, 120)}...`);
-      return cleaned.slice(0, 480);
-    }
-    console.warn(`[Illustration] Visual brief too short (${cleaned.length} chars), using heuristic excerpt`);
-  } catch (e) {
-    console.warn(
-      '[Illustration] Visual brief LLM call failed, using heuristic excerpt:',
-      e instanceof Error ? e.message : e
-    );
-  }
-
-  // Heuristic fallback: the opening beats of the chapter itself — still
-  // derived from the real prose, never the outline synopsis.
-  const sentences = content.match(/[^.!?]+[.!?]+/g) ?? [];
-  const opening = (sentences.slice(0, 2).join(' ') || content.slice(0, 220))
-    .replace(/\s+/g, ' ')
-    .trim();
-  return opening.slice(0, 300);
-}
 
 /**
  * Initial entry point to start the book generation process.
@@ -513,7 +464,9 @@ export async function generateChapter(bookId: string, ownerId: string, jobId: st
           characterNames.length > 0 ? characterNames.slice(0, 4) : undefined
         );
         if (illustration.success && illustration.publicUrl) {
-          await db.chapter.update({ where: { id: chapter.id }, data: { illustrationUrl: illustration.publicUrl, illustrationPrompt: scenePrompt } });
+          // Store the exact prompt the backend received (style anchor + scene),
+          // so the artwork can always be traced back to the brief that made it.
+          await db.chapter.update({ where: { id: chapter.id }, data: { illustrationUrl: illustration.publicUrl, illustrationPrompt: illustration.prompt ?? scenePrompt } });
         } else {
           console.error(`[Illustration] Generation failed for chapter ${chapterIndex + 1} (book ${bookId}): ${illustration.error ?? 'no URL returned'}`);
         }

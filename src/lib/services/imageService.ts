@@ -1,7 +1,15 @@
 // HydraSkript - Image Generation Service (Hardened for Coloring Books)
-// Fallback chain: Pollinations AI (default) → OpenRouter Images API → Stability AI.
+// Fallback chain: Pollinations AI (default) → OpenRouter Images API → Stability AI → Pruna AI.
+// The order is overridable with the IMAGE_BACKEND_ORDER env var.
 import { saveBase64File, generateFilename, createMediaAsset } from '@/lib/utils/storage';
-import { STYLE_CONFIG, COLORING_THEMES } from '@/types';
+import { COLORING_THEMES } from '@/types';
+import {
+  buildNegativePrompt,
+  composeImagePrompt,
+  resolveBackendOrder,
+  BACKEND_LABELS,
+  type ImageBackend,
+} from '@/lib/services/imagePrompts';
 import type { ColoringTheme, TargetAudience } from '@/types';
 
 type ImageSize = '1024x1024' | '768x1344' | '864x1152' | '1344x768' | '1152x864' | '1440x720' | '720x1440';
@@ -13,6 +21,7 @@ export interface GenerateImageOptions {
   ownerId: string;
   bookId?: string;
   assetType: string;
+  negativePrompt?: string;
 }
 
 export interface GeneratedImageResult {
@@ -20,6 +29,8 @@ export interface GeneratedImageResult {
   publicUrl?: string;
   assetId?: string;
   error?: string;
+  /** The exact prompt that was sent to the backend (style anchor + scene). */
+  prompt?: string;
 }
 
 const LINE_ART_STYLES = new Set(['lineart', 'lineart-adult']);
@@ -42,6 +53,62 @@ async function isDegenerateImage(buffer: Buffer): Promise<boolean> {
   } catch {
     return true;
   }
+}
+
+/**
+ * Mean HSV saturation of an image (0 = greyscale, 1 = fully saturated).
+ * Returns 1 when the image cannot be analysed so the gate never blocks
+ * generation on an analysis error.
+ */
+async function meanSaturation(buffer: Buffer): Promise<number> {
+  try {
+    const sharp = (await import('sharp')).default;
+    const { data, info } = await sharp(buffer)
+      .resize(64, 64, { fit: 'fill' })
+      .removeAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    const channels = info.channels || 3;
+    const pixels = info.width * info.height;
+    let sum = 0;
+    for (let i = 0; i < data.length; i += channels) {
+      const r = data[i] ?? 0;
+      const g = data[i + 1] ?? 0;
+      const b = data[i + 2] ?? 0;
+      const max = Math.max(r, g, b);
+      const min = Math.min(r, g, b);
+      sum += max === 0 ? 0 : (max - min) / max;
+    }
+    return pixels > 0 ? sum / pixels : 1;
+  } catch {
+    return 1;
+  }
+}
+
+/**
+ * Full-colour quality gate.
+ *
+ * A Pixar frame is vivid. When a model ignores the style anchor it drifts
+ * into a grey, desaturated or monochrome render — which reads as "not really
+ * Pixar" no matter how good the prompt was. Rejecting those frames re-rolls the
+ * seed (and, once the retries are spent, hands the job to the next backend).
+ *
+ * The threshold is deliberately low so a moody but colourful scene still
+ * passes; only washed-out/greyscale output is rejected.
+ */
+const MIN_ILLUSTRATION_SATURATION = 0.15;
+
+async function isFullColorUsable(buffer: Buffer, options: GenerateImageOptions): Promise<boolean> {
+  if (options.style !== 'pixar') return true;
+  if (options.assetType === 'coloring_page') return true;
+  const saturation = await meanSaturation(buffer);
+  if (saturation < MIN_ILLUSTRATION_SATURATION) {
+    console.warn(
+      `[imageService] color gate reject: saturation ${saturation.toFixed(3)} < ${MIN_ILLUSTRATION_SATURATION} (image is washed out / greyscale)`
+    );
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -378,6 +445,22 @@ async function generateWithGemini(prompt: string, options: GenerateImageOptions)
 }
 
 /**
+ * Nearest canvas size the OpenRouter image models reliably accept, keeping the
+ * requested orientation. Only used as a retry when the model rejects the size
+ * we asked for.
+ */
+function normalizeOpenRouterSize(size: string): string {
+  const supported = new Set(['1024x1024', '1024x1536', '1536x1024', '1792x1024', '1024x1792']);
+  if (supported.has(size)) return size;
+  const [w, h] = size.split('x').map((n) => parseInt(n, 10));
+  if (!Number.isFinite(w) || !Number.isFinite(h) || h <= 0) return '1024x1024';
+  const ratio = w / h;
+  if (ratio > 1.05) return '1536x1024';
+  if (ratio < 0.95) return '1024x1536';
+  return '1024x1024';
+}
+
+/**
  * Backend: OpenRouter Images API (POST /api/v1/images).
  * First backup when Pollinations fails. Returns base64 in data[0].b64_json.
  * Model is env-tunable via OPENROUTER_IMAGE_MODEL.
@@ -394,7 +477,22 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
     console.log(`[imageService] Attempting OpenRouter /api/v1/images with model ${model}`);
 
     const maxRetries = 3;
+    // A stable per-book seed keeps characters/art consistent across chapters.
+    // Retries shift the seed so a rejected frame is not simply re-drawn.
+    const baseSeed = hashString(`${options.bookId ?? options.ownerId}:${options.assetType}`) % 2147483647;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      // Body is rebuilt per attempt so a rejected field (negative_prompt) or
+      // an unsupported size can be dropped and the request retried instead of
+      // failing the whole call.
+      const bodyPayload: Record<string, unknown> = {
+        model,
+        prompt,
+        size: options.size || '1024x1024',
+        output_format: 'png',
+        n: 1,
+        seed: (baseSeed + (attempt - 1) * 7919) % 2147483647,
+      };
+      if (options.negativePrompt) bodyPayload.negative_prompt = options.negativePrompt;
       try {
         console.log(`[imageService] OpenRouter attempt ${attempt}`);
 
@@ -408,14 +506,7 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
             'Authorization': `Bearer ${apiKey}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({
-            model,
-            prompt,
-            size: options.size || '1024x1024',
-            output_format: 'png',
-            n: 1,
-            seed: hashString(`${options.bookId ?? options.ownerId}:${options.assetType}`) % 2147483647,
-          }),
+          body: JSON.stringify(bodyPayload),
           signal: controller.signal
         });
 
@@ -428,6 +519,21 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
           const errorMsg = `OpenRouter API error: ${response.status} ${response.statusText}` +
             (errorData.error?.message ? ` - ${errorData.error.message}` : '');
           console.error('[imageService] OpenRouter API error:', errorMsg);
+          // Not every image model accepts a negative prompt. Drop the field and
+          // retry the same request rather than failing the illustration.
+          if (bodyPayload.negative_prompt && /negative|unknown|unrecognized|invalid/i.test(errorMsg)) {
+            console.warn('[imageService] OpenRouter rejected negative_prompt — retrying without it');
+            delete bodyPayload.negative_prompt;
+            continue;
+          }
+          // Some models only accept a fixed set of canvas sizes; fall back to
+          // the nearest supported one that keeps the same orientation.
+          if (/size|resolution|aspect|dimension/i.test(errorMsg) && bodyPayload.size !== '1024x1024') {
+            const fallbackSize = normalizeOpenRouterSize(String(bodyPayload.size));
+            console.warn(`[imageService] OpenRouter rejected size ${bodyPayload.size} — retrying with ${fallbackSize}`);
+            bodyPayload.size = fallbackSize;
+            continue;
+          }
           throw new Error(errorMsg);
         }
 
@@ -463,6 +569,17 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
         if (!base64Data) {
           console.error('[imageService] OpenRouter returned no image data');
           return { success: false, error: 'OpenRouter returned no image data' };
+        }
+
+        // A washed-out/greyscale frame means the style anchor was ignored.
+        // Re-roll instead of shipping it as the chapter's illustration.
+        if (!(await isFullColorUsable(Buffer.from(base64Data, 'base64'), options))) {
+          console.warn(`[imageService] OpenRouter frame failed the colour gate (attempt ${attempt}/${maxRetries})`);
+          if (attempt === maxRetries) {
+            return { success: false, error: 'OpenRouter returned a washed-out image on every attempt' };
+          }
+          await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+          continue;
         }
 
         console.log('[imageService] Image generation successful with OpenRouter');
@@ -549,10 +666,14 @@ async function generateWithPollinations(prompt: string, size: ImageSize, options
   const needsLineArt = options.assetType === 'coloring_page' || LINE_ART_STYLES.has(options.style || '');
   const { width, height } = pollinationsSize(size);
   const model = process.env.POLLINATIONS_MODEL || 'flux';
-  // Pollinations ignores "no color" instructions in the positive prompt, so pass
-  // an explicit negative prompt for line-art styles to bias it toward outlines.
-  const negative = LINE_ART_STYLES.has(options.style || '')
-    ? `&negative_prompt=${encodeURIComponent('color, colorful, shading, gradient, grayscale, painting, 3d, photorealistic, filled')}`
+  // Pollinations ignores "no color" / "no photo" instructions inside the
+  // positive prompt, so the negative prompt has to be passed explicitly:
+  // line art is pushed away from color, full-color illustrations are pushed
+  // away from every look that competes with the style anchor (photos, anime,
+  // 2D cartoons, painted illustration, stray lettering).
+  const negativeText = options.negativePrompt || buildNegativePrompt(options.style || 'pixar', options.assetType);
+  const negative = negativeText
+    ? `&negative_prompt=${encodeURIComponent(negativeText)}`
     : '';
 
   const maxRetries = 4;
@@ -590,6 +711,15 @@ async function generateWithPollinations(prompt: string, size: ImageSize, options
       // Reject flat washes outright — nothing to extract.
       if (await isDegenerateImage(buffer)) {
         lastError = `Pollinations returned a flat image (attempt ${attempt}/${maxRetries})`;
+        console.warn(`[imageService] ${lastError}; retrying with a new seed...`);
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        continue;
+      }
+
+      // A full-colour page that comes back grey/washed out is a style
+      // failure, not artwork — re-roll the seed instead of shipping it.
+      if (!(await isFullColorUsable(buffer, options))) {
+        lastError = `Pollinations returned a washed-out image (attempt ${attempt}/${maxRetries})`;
         console.warn(`[imageService] ${lastError}; retrying with a new seed...`);
         await new Promise((resolve) => setTimeout(resolve, 800));
         continue;
@@ -678,14 +808,16 @@ async function generateWithPruna(prompt: string, size: ImageSize, options: Gener
 
   const aspect_ratio = prunaAspectRatio(size);
   const baseSeed = hashString(`${options.bookId ?? options.ownerId}:${options.assetType}`);
-  const maxRetries = 4;
+  // Bounded retries: this backend sits in a fallback chain that blocks the
+  // book's chapter pipeline, so it must fail fast rather than stall it.
+  const maxRetries = 3;
   let lastError = '';
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     const seed = (baseSeed + attempt * 7919) % 2147483647;
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 90_000);
+      const timer = setTimeout(() => controller.abort(), 60_000);
       let submission: Record<string, unknown>;
       try {
         const response = await fetch('https://api.pruna.ai/v1/predictions', {
@@ -734,12 +866,27 @@ async function generateWithPruna(prompt: string, size: ImageSize, options: Gener
 
       const contentType = imageResponse.headers.get('content-type') || (imageUrl.includes('.png') ? 'image/png' : 'image/jpeg');
       const base64 = buffer.toString('base64');
-      const converted = await toLineArtBase64(base64, contentType);
-      const finalBase64 = converted ? converted.base64 : base64;
-      const finalMime = converted ? converted.mimeType : contentType;
-      if (!(await isLineArtUsable(Buffer.from(finalBase64, 'base64')))) {
-        console.warn(`[gate-debug] attempt ${attempt}: converted=${!!converted} mime=${finalMime} len=${finalBase64.length}`);
-        lastError = `Pruna image failed the quality gate (attempt ${attempt}/${maxRetries})`;
+
+      // Only coloring pages / line-art styles get the line-art conversion and
+      // the coloring-page density gate. Applying them to a full-colour
+      // illustration stripped every illustration to an outline and then
+      // rejected it — which is why this backend was never in the chain.
+      const needsLineArt = options.assetType === 'coloring_page' || LINE_ART_STYLES.has(options.style || '');
+      let finalBase64 = base64;
+      let finalMime = contentType;
+      if (needsLineArt) {
+        const converted = await toLineArtBase64(base64, contentType);
+        finalBase64 = converted ? converted.base64 : base64;
+        finalMime = converted ? converted.mimeType : contentType;
+        if (!(await isLineArtUsable(Buffer.from(finalBase64, 'base64')))) {
+          console.warn(`[gate-debug] attempt ${attempt}: converted=${!!converted} mime=${finalMime} len=${finalBase64.length}`);
+          lastError = `Pruna image failed the quality gate (attempt ${attempt}/${maxRetries})`;
+          console.warn(`[imageService] ${lastError}; retrying with a new seed...`);
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          continue;
+        }
+      } else if (!(await isFullColorUsable(buffer, options))) {
+        lastError = `Pruna returned a washed-out image (attempt ${attempt}/${maxRetries})`;
         console.warn(`[imageService] ${lastError}; retrying with a new seed...`);
         await new Promise((resolve) => setTimeout(resolve, 500));
         continue;
@@ -796,8 +943,12 @@ async function generateWithStability(prompt: string, size: ImageSize, options: G
   form.append('aspect_ratio', aspectRatio);
   form.append('output_format', 'png');
   form.append('seed', String(seed));
-  if (options.style === 'lineart' || options.style === 'lineart-adult') {
-    form.append('negative_prompt', 'color, gradient, grayscale, shading, 3d, photo, photorealistic, full color');
+  // Negative prompt: line art is pushed away from color, full-colour art is
+  // pushed away from every look that competes with the style anchor (photos,
+  // anime, 2D cartoons, painted illustration, stray lettering).
+  const negativeText = options.negativePrompt || buildNegativePrompt(options.style || 'pixar', options.assetType);
+  if (negativeText) {
+    form.append('negative_prompt', negativeText);
   }
 
   const maxRetries = 3;
@@ -859,70 +1010,89 @@ async function generateWithStability(prompt: string, size: ImageSize, options: G
   return { success: false, error: `Stability generation failed after ${maxRetries} attempts` };
 }
 
+function isBackendConfigured(backend: ImageBackend): boolean {
+  switch (backend) {
+    case 'pollinations':
+      return !!process.env.POLLINATIONS_API_KEY;
+    case 'openrouter':
+      return !!(process.env.OPENROUTER_API_KEY || process.env.OPEN_ROUTER_API_KEY);
+    case 'stability':
+      return !!process.env.STABILITY_AI_API_KEY;
+    case 'pruna':
+      return !!process.env.PRUNA_AI_API_KEY;
+    default:
+      return false;
+  }
+}
+
 /**
- * Generate an image using available backends with prioritized fallbacks
- * Prioritizes Pollinations as default, OpenRouter as first backup, Stability as second backup
+ * Generate an image using the available backends with prioritized fallbacks.
+ *
+ * The prompt is composed as: style anchor → scene → style anchor again, and a
+ * matching negative prompt is passed to every backend that supports one.
  */
 export async function generateImage(options: GenerateImageOptions): Promise<GeneratedImageResult> {
   const { prompt, style = 'pixar', size = '1024x1024', ownerId, bookId, assetType } = options;
-  const styleConfig = STYLE_CONFIG[style] || STYLE_CONFIG.pixar;
-  // Style FIRST: image models weight the head of the prompt most heavily, so
-  // the style anchor leads and the scene description follows. (Previously the
-  // style was appended after the scene, which diluted e.g. the Pixar look.)
-  const enhancedPrompt = `${styleConfig.prompt}. ${prompt}`;
 
-  console.log(`[imageService] generateImage called with: style=${style}, assetType=${assetType}, bookId=${bookId}`);
+  // Style FIRST and style LAST: image models weight the head of a prompt most
+  // heavily, but the tail is what they read last — repeating the anchor on
+  // both ends is what stops the scene description from washing the look out.
+  const enhancedPrompt = composeImagePrompt(style, prompt);
+  const negativePrompt = options.negativePrompt || buildNegativePrompt(style, assetType);
+  const backendOptions: GenerateImageOptions = { ...options, prompt: enhancedPrompt, negativePrompt };
 
-  // Primary: Pollinations AI (your preferred default)
-  if (process.env.POLLINATIONS_API_KEY) {
-    console.log('[imageService] Trying Pollinations AI as primary backend');
+  console.log(
+    `[imageService] generateImage called with: style=${style}, assetType=${assetType}, bookId=${bookId}`
+  );
+
+  const order = resolveBackendOrder(style, assetType);
+  const configured = order.filter(isBackendConfigured);
+  // Pollinations still serves some accounts without a key. Keep it as a last
+  // resort in that case (historical behaviour), but never before a backend
+  // that is actually funded.
+  const anonymousFallback = order.filter((b) => b === 'pollinations' && !isBackendConfigured(b));
+  const attemptOrder = [...configured, ...anonymousFallback];
+
+  if (attemptOrder.length === 0) {
+    return {
+      success: false,
+      error:
+        'No image backend is configured. Set one of POLLINATIONS_API_KEY, OPENROUTER_API_KEY, STABILITY_AI_API_KEY or PRUNA_AI_API_KEY.',
+    };
+  }
+  console.log(`[imageService] Backend order: ${attemptOrder.map((b) => BACKEND_LABELS[b]).join(' → ')}`);
+
+  for (const backend of attemptOrder) {
+    console.log(`[imageService] Trying ${BACKEND_LABELS[backend]}`);
     try {
-      const pollinationsResult = await generateWithPollinations(enhancedPrompt, size, options);
-      if (pollinationsResult.success) return pollinationsResult;
-      console.error('[imageService] Pollinations image generation failed:', pollinationsResult.error);
+      let result: GeneratedImageResult;
+      switch (backend) {
+        case 'pollinations':
+          result = await generateWithPollinations(enhancedPrompt, size, backendOptions);
+          break;
+        case 'openrouter':
+          result = await generateWithOpenRouter(enhancedPrompt, backendOptions);
+          break;
+        case 'stability':
+          result = await generateWithStability(enhancedPrompt, size, backendOptions);
+          break;
+        case 'pruna':
+          result = await generateWithPruna(enhancedPrompt, size, backendOptions);
+          break;
+      }
+      if (result.success) {
+        console.log(`[imageService] ${BACKEND_LABELS[backend]} produced the image`);
+        // Hand back the exact prompt so the caller can store it on the
+        // chapter — "what did the artist actually get?" must be answerable.
+        return { ...result, prompt: enhancedPrompt };
+      }
+      console.error(`[imageService] ${BACKEND_LABELS[backend]} image generation failed:`, result.error);
     } catch (error) {
-      console.error('[imageService] Pollinations image generation failed with error:', error);
+      console.error(`[imageService] ${BACKEND_LABELS[backend]} image generation failed with error:`, error);
     }
   }
 
-  // First Backup: OpenRouter (for better quality when Pollinations fails)
-  const openRouterApiKey = process.env.OPENROUTER_API_KEY || process.env.OPEN_ROUTER_API_KEY;
-  if (openRouterApiKey) {
-    console.log('[imageService] Trying OpenRouter as first backup');
-    try {
-      const openRouterResult = await generateWithOpenRouter(enhancedPrompt, { ...options, prompt: enhancedPrompt });
-      if (openRouterResult.success) return openRouterResult;
-      console.error('[imageService] OpenRouter image generation failed:', openRouterResult.error);
-    } catch (error) {
-      console.error('[imageService] OpenRouter image generation failed with error:', error);
-    }
-  }
-
-  // Second Backup: Stability AI
-  if (process.env.STABILITY_AI_API_KEY) {
-    console.log('[imageService] Trying Stability AI as second backup');
-    try {
-      const stabilityResult = await generateWithStability(enhancedPrompt, size, { ...options, prompt: enhancedPrompt });
-      if (stabilityResult.success) return stabilityResult;
-      console.error('[imageService] Stability image generation failed:', stabilityResult.error);
-    } catch (error) {
-      console.error('[imageService] Stability image generation failed with error:', error);
-    }
-  }
-
-  // Final fallback: Pollinations (again, in case of specific failures)
-  if (!process.env.POLLINATIONS_API_KEY) {
-    console.log('[imageService] Final fallback to Pollinations (if not already tried)');
-    try {
-      const pollinationsResult = await generateWithPollinations(enhancedPrompt, size, options);
-      if (pollinationsResult.success) return pollinationsResult;
-      console.error('[imageService] Final Pollinations fallback failed:', pollinationsResult.error);
-    } catch (error) {
-      console.error('[imageService] Final Pollinations fallback failed with error:', error);
-    }
-  }
-
-  // If we get here, all backends failed
+  // If we get here, all configured backends failed
   return {
     success: false,
     error: 'All image backends failed. Please check API keys and account balances.'
@@ -958,10 +1128,15 @@ export async function generateBookCover(bookId: string, ownerId: string, bookTit
 export async function generateChapterIllustration(bookId: string, ownerId: string, chapterIndex: number, illustrationPrompt: string, style: string = 'pixar', characterNames?: string[]): Promise<GeneratedImageResult> {
   // Character Consistency Logic: anchor recurring characters to a stable look
   // so the cast doesn't redraw itself between chapters.
+  //
+  // The consistency note goes AFTER the scene, not before it. Leading with an
+  // instruction ("Series character consistency: …") pushed the actual picture
+  // description into the middle of the prompt, where image models weight it
+  // least — the scene is what makes the artwork match the page.
   let finalPrompt = illustrationPrompt;
   if (characterNames && characterNames.length > 0) {
     const hero = characterNames[0];
-    finalPrompt = `Series character consistency: the recurring main character is ${hero}. Keep ${hero}'s face, hairstyle, outfit and color palette identical to the other illustrations in this series. ${illustrationPrompt}`;
+    finalPrompt = `${illustrationPrompt} The recurring main character is ${hero}: keep ${hero}'s face, hairstyle, outfit and colour palette identical in every illustration of this series.`;
   }
 
   // For children's books, ensure we're generating full-color illustrations

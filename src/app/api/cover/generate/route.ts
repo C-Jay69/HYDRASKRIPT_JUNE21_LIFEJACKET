@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getOrCreateProfile } from '@/lib/utils/bookHelpers';
 import { getAuthEmail } from '@/lib/auth-helpers';
-import { STYLE_CONFIG } from '@/types';
 import { generateImage } from '@/lib/services/imageService';
 
 export async function POST(request: NextRequest) {
@@ -38,20 +37,19 @@ export async function POST(request: NextRequest) {
     const isChildrenBook = ['0-5', '6-9', '10-14'].includes(targetAudience);
     const isColoringBook = genre === 'coloring';
     const effectiveStyle = style || (isColoringBook ? (isChildrenBook ? 'lineart' : 'lineart-adult') : 'pixar');
-    const styleConfig = STYLE_CONFIG[effectiveStyle] || STYLE_CONFIG.pixar;
 
-    // Build enhanced prompt: USER PROMPT FIRST, then style reinforcement
+    // Build enhanced prompt: the user's direction first, then cover-specific
+    // direction. The style anchor itself is added by generateImage — once at
+    // the head and once at the tail — so it is deliberately NOT repeated here.
     let finalPrompt = prompt.trim();
-    
+
     // For coloring books, enforce line art
     if (isColoringBook && coloringTheme) {
       finalPrompt = `${finalPrompt}. Pure black and white line art, no shading, no color, clean white background.`;
     }
-    // For regular covers, append style keywords as reinforcement (not replacement)
+    // For regular covers, add the cover framing only
     else if (!isColoringBook) {
-      // Extract key visual descriptors from style config
-      const styleKeywords = styleConfig.prompt.split(',').slice(0, 6).join(', ');
-      finalPrompt = `${finalPrompt}, ${styleKeywords}, professional book cover, no title text, no author name`;
+      finalPrompt = `${finalPrompt}, professional book cover composition, no title text, no author name`;
     }
 
     const result = await generateImage({
