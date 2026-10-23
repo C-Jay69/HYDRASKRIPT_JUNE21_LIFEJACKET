@@ -24,6 +24,7 @@ import {
   guessFallbackSheet,
   identityPhrase,
   isCompleteSheet,
+  nameVariants,
   normalizeDescriptor,
   parseCastEntry,
   parseCharacterSheet,
@@ -621,5 +622,139 @@ describe('applyCharacterSheetToScene', () => {
     expect(separation).toContain('belong only to the puppy');
     expect(buildExactCountClause(scene, SHEET)).toBe(`${lead} ${separation}`);
     expect(censusParts('Empty beach.', SHEET)).toEqual({ lead: '', separation: '' });
+  });
+});
+
+// Round 6 — the vanishing mother. A user's cast list said "MAMMA" (or
+// forgot her entirely) while the story text named "MAMA" chapter after
+// chapter; exact-name matching never saw her, so she got no anchor, no
+// census line, and not one illustration. Family terms are now one person
+// across spellings, and prose-named recurring characters are adopted.
+describe('family-term aliasing (the vanishing mother)', () => {
+  const MAMMA_SHEET: CharacterSheetEntry[] = [
+    { name: 'Mamma', countNoun: 'mother', isAnimal: false, descriptor: 'a warm mother with long dark hair in a bun, light golden-brown skin, wearing a teal floral summer dress' },
+    { name: 'Victoria', countNoun: 'girl', isAnimal: false, descriptor: 'a 4 year old girl with long black hair in two braids, light golden-brown skin, wearing a pink t-shirt and denim shorts' },
+  ];
+
+  it('nameVariants unifies mother/father spellings and leaves other names alone', () => {
+    expect(nameVariants('Mama')).toContain('mamma');
+    expect(nameVariants('MAMMA')).toContain('mama');
+    expect(nameVariants('Mommy')).toContain('mother');
+    expect(nameVariants('Dada')).toContain('daddy');
+    expect(nameVariants('Victoria')).toEqual(['victoria']);
+  });
+
+  it('prose "MAMA" summons the cast "MAMMA" entry (census + anchor)', () => {
+    const scene = 'MAMA has a big smile. Victoria runs to her.';
+    const present = presentInScene(scene, MAMMA_SHEET).map((e) => e.name);
+    expect(present).toContain('Mamma');
+    expect(anchorSceneWithSheet(scene, MAMMA_SHEET)).toContain('MAMA, a warm mother with long dark hair');
+    const out = applyCharacterSheetToScene(scene, MAMMA_SHEET);
+    expect(out).toContain('exactly one mother');
+    expect(out).toContain('exactly one girl');
+  });
+
+  it('generic "the mother" does not summon her (mention must look like a name)', () => {
+    const scene = 'The mother goose watched from the bank as Victoria played.';
+    expect(presentInScene(scene, MAMMA_SHEET).map((e) => e.name)).toEqual(['Victoria']);
+  });
+
+  it('an exact name outranks an alias claim — no double census', () => {
+    const both: CharacterSheetEntry[] = [
+      { name: 'Mama', countNoun: 'mother', isAnimal: false, descriptor: 'a young mother with long black hair in a braid, warm brown skin, wearing a teal blouse' },
+      { name: 'Mommy', countNoun: 'mother', isAnimal: false, descriptor: 'an older mother with grey curls, fair skin, wearing a navy cardigan' },
+    ];
+    expect(presentInScene('Mama waves at the boat.', both).map((e) => e.name)).toEqual(['Mama']);
+  });
+
+  it('merges a variant-spelled extraction onto the cast name', async () => {
+    mockAskLLM.mockReset();
+    mockAskLLM.mockResolvedValue(
+      JSON.stringify([
+        { name: 'MAMA', countNoun: 'mother', isAnimal: false, descriptor: 'a warm mother with long dark hair in a bun, light golden-brown skin, wearing a teal floral summer dress' },
+      ])
+    );
+    const sheet = await buildCharacterSheet({
+      names: ['MAMMA'],
+      sampleProse: 'MAMA has a big smile and warm dark hair.',
+    });
+    expect(sheet).toHaveLength(1);
+    expect(sheet[0].name).toBe('Mamma');
+    expect(sheet[0].descriptor).toContain('floral summer dress');
+    expect(mockAskLLM).toHaveBeenCalledTimes(1); // no phantom twin, nothing thin to enrich
+  });
+
+  it('kinds a family-term name from the name alone in the guessed sheet', () => {
+    // Look-only hint, no kind word anywhere: she must still census as a
+    // mother, not "a character".
+    const sheet = guessFallbackSheet(['MAMA (long dark hair in a bun)'], '');
+    expect(sheet[0].countNoun).toBe('mother');
+  });
+});
+
+describe('adopting prose-named characters the cast forgot', () => {
+  it('adopts the prose-named mother missing from the cast', async () => {
+    mockAskLLM.mockReset();
+    mockAskLLM.mockResolvedValue(
+      JSON.stringify([
+        { name: 'Victoria', countNoun: 'girl', isAnimal: false, descriptor: 'a 4 year old girl with long black hair in two braids, light golden-brown skin, wearing a pink t-shirt and denim shorts' },
+        { name: 'MAMA', countNoun: 'mother', isAnimal: false, descriptor: 'a warm mother with long dark hair in a bun, light golden-brown skin, wearing a teal floral summer dress' },
+      ])
+    );
+    const sheet = await buildCharacterSheet({
+      names: ['Victoria'],
+      sampleProse: 'MAMA has a big smile. Victoria laughed as MAMA danced around the kitchen.',
+    });
+    // Adopted under the prose name, normalised the way cast names are
+    // (shout-case "MAMA" becomes the matchable "Mama").
+    expect(sheet.map((e) => e.name)).toContain('Mama');
+    expect(isCompleteSheet(sheet)).toBe(true);
+    expect(mockAskLLM).toHaveBeenCalledTimes(1);
+  });
+
+  it('still drops characters the prose never mentions', async () => {
+    mockAskLLM.mockReset();
+    mockAskLLM.mockResolvedValue(
+      JSON.stringify([
+        { name: 'Victoria', countNoun: 'girl', isAnimal: false, descriptor: 'a 4 year old girl with long black hair in two braids, light golden-brown skin, wearing a pink t-shirt and denim shorts' },
+        { name: 'Uncle Bruno', countNoun: 'man', isAnimal: false, descriptor: 'a burly man with a red beard, fair skin, wearing overalls' },
+      ])
+    );
+    const sheet = await buildCharacterSheet({
+      names: ['Victoria'],
+      sampleProse: 'Victoria plays alone on the beach all day.',
+    });
+    expect(sheet.map((e) => e.name)).toEqual(['Victoria']);
+  });
+
+  it('never duplicates a family-variant of a cast member as an adoptee', async () => {
+    mockAskLLM.mockReset();
+    mockAskLLM.mockResolvedValue(
+      JSON.stringify([
+        { name: 'Mama', countNoun: 'mother', isAnimal: false, descriptor: 'a warm mother with long dark hair in a bun, light golden-brown skin, wearing a teal floral summer dress' },
+        { name: 'Mommy', countNoun: 'mother', isAnimal: false, descriptor: 'a warm mother with long dark hair in a bun, light golden-brown skin, wearing a teal floral summer dress' },
+      ])
+    );
+    const sheet = await buildCharacterSheet({
+      names: ['MAMMA'],
+      sampleProse: 'MAMA has a big smile. Mommy waved too.',
+    });
+    expect(sheet).toHaveLength(1);
+    expect(sheet[0].name).toBe('Mamma');
+  });
+});
+
+describe('enrichment storm guard', () => {
+  it('skips enrichment when the extraction hit its own 30s timeout', async () => {
+    mockAskLLM.mockReset();
+    mockAskLLM.mockRejectedValue(new Error('Character sheet extraction timed out after 30s'));
+    const sheet = await buildCharacterSheet({
+      names: ['Victoria (a 4 year old girl)'],
+      sampleProse: 'Victoria plays on the beach.',
+    });
+    expect(mockAskLLM).toHaveBeenCalledTimes(1); // no second 30s burned behind the timeout
+    // The guessed sheet carries the user's hint as the (unfreezable) look.
+    expect(sheet).toHaveLength(1);
+    expect(isCompleteSheet(sheet)).toBe(false);
   });
 });

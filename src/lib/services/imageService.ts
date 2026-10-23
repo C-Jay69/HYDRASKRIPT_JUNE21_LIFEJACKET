@@ -18,6 +18,7 @@ import { verifyIllustration } from '@/lib/services/imageQA';
 import {
   classifySizeError,
   nearestAspectRatio,
+  parseAcceptedTierIndex,
   parseMinimumPixels,
   tierIndexForResolution,
   RESOLUTION_TIERS,
@@ -462,6 +463,13 @@ async function generateWithGemini(prompt: string, options: GenerateImageOptions)
 }
 
 /**
+ * Resolution tiers providers have NAMED as acceptable, learned from 400s
+ * ("Accepted: 1K") and reused for later images in this process so a
+ * 1K-only model doesn't re-teach us via two failed attempts per image.
+ */
+const acceptedTierByModel = new Map<string, number>();
+
+/**
  * Backend: OpenRouter Images API (POST /api/v1/images).
  * First backup when Pollinations fails. Returns base64 in data[0].b64_json.
  * Model is env-tunable via OPENROUTER_IMAGE_MODEL.
@@ -503,7 +511,10 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
     // "1K" for per-megapixel-billed models like flux.2).
     const { width, height } = pollinationsSize(options.size ?? '1024x1024');
     const aspectRatio = nearestAspectRatio(width, height);
-    let tierIndex = tierIndexForResolution(process.env.OPENROUTER_IMAGE_RESOLUTION);
+    // A provider that named its accepted tier earlier in this process
+    // (flash-lite-image: 1K only) starts there instead of re-learning
+    // through two 400s on every image.
+    let tierIndex = acceptedTierByModel.get(model) ?? tierIndexForResolution(process.env.OPENROUTER_IMAGE_RESOLUTION);
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       const bodyPayload: Record<string, unknown> = { model, prompt, n: 1 };
       if (stripLevel < 2) {
@@ -551,6 +562,17 @@ async function generateWithOpenRouter(prompt: string, options: GenerateImageOpti
                 ? 'OpenRouter has insufficient credits for image generation (402). Top up the account or fund another image backend.'
                 : 'OpenRouter rejected the API key (401). Check OPENROUTER_API_KEY.',
             };
+          }
+          // Named-tier recovery first: some providers state the exact tier
+          // they accept ("resolution: not supported. Accepted: 1K" —
+          // gemini flash-lite-image). Jump straight to it and remember it
+          // for this model, instead of burning both strip levels per image.
+          const acceptedTier = parseAcceptedTierIndex(errorMsg);
+          if (acceptedTier !== null && acceptedTier !== tierIndex) {
+            tierIndex = acceptedTier;
+            acceptedTierByModel.set(model, tierIndex);
+            console.warn(`[imageService] OpenRouter model accepts resolution ${RESOLUTION_TIERS[tierIndex]} — retrying at that tier`);
+            continue;
           }
           // Directional size recovery: walk the resolution tier the way the
           // model asked. A pixel-floor model (Seedream: "requires at least
