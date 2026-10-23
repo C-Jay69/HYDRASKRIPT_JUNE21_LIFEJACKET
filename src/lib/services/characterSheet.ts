@@ -186,13 +186,124 @@ export function serializeCharacterSheet(sheet: CharacterSheet): string {
 }
 
 /**
- * True when every entry carries a real, freezable look. Weaker sheets (the
- * no-LLM guessing fallback) are used for the current prompt but NOT stored,
- * so the next chapter retries the proper extraction instead of locking in
- * "a puppy" as canon forever.
+ * Trait coverage: which identity-pinning details a descriptor actually
+ * states. This replaced a LENGTH-only freeze gate (≥15 chars) that happily
+ * froze "a 4 year old girl" (17 chars) as canon — the image model then
+ * re-invented hair colour, skin tone and even apparent gender on every
+ * page, because a text-to-image model holds ONLY what the words pin (the
+ * same book's dog, "a black lab/retriever", and its green-polo father
+ * never drifted). Detection looks for the canonical phrasings the
+ * extraction / enrichment prompts are told to produce: a colour word
+ * bound to hair, a colour word bound to "skin", a colour word bound to
+ * a garment, and (for animals) a coat colour that isn't just an accessory.
  */
+export interface DescriptorTraits {
+  hair: boolean;
+  skin: boolean;
+  outfit: boolean;
+  coat: boolean;
+}
+
+const TRAIT_COLOURS = [
+  'black', 'brown', 'blonde', 'blond', 'red', 'ginger', 'auburn', 'grey', 'gray',
+  'white', 'silver', 'golden', 'chestnut', 'sandy', 'copper', 'strawberry',
+  'dark', 'light', 'pale', 'fair', 'olive', 'tan', 'tanned', 'bronze', 'ebony',
+  'mahogany', 'cream', 'ivory', 'peach', 'rosy', 'deep', 'warm', 'rich',
+  'orange', 'pink', 'purple', 'violet', 'blue', 'green', 'yellow', 'teal',
+  'turquoise', 'maroon', 'burgundy', 'navy', 'beige', 'khaki', 'coral', 'lavender',
+];
+const COLOUR_PATTERN = TRAIT_COLOURS.join('|');
+
+/** True when a colour word sits just in front of one of the anchor nouns, inside the same clause. */
+function colourBefore(text: string, anchors: string[]): boolean {
+  return anchors.some((anchor) => new RegExp(`\\b(?:${COLOUR_PATTERN})\\b[^,;]{0,24}?\\b${anchor}\\b`, 'i').test(text));
+}
+
+const GARMENT_ANCHORS = [
+  'dress', 'sundress', 'overalls', 'dungarees', 'shirt', 't-shirt', 'top', 'blouse',
+  'pants', 'trousers', 'jeans', 'shorts', 'skirt', 'leggings', 'boots', 'shoes',
+  'sneakers', 'sandals', 'wellies', 'hat', 'cap', 'jacket', 'coat', 'sweater',
+  'jumper', 'cardigan', 'gown', 'frock', 'cloak', 'apron', 'uniform', 'robe',
+  'vest', 'pyjamas', 'pajamas', 'onesie', 'scarf', 'bow', 'ribbon', 'outfit',
+];
+
+/** True when some colour in the text is not merely decorating an accessory ("a blue collar"). */
+function hasNonAccessoryColour(text: string): boolean {
+  const accessory = /\b(collar|bow|bandana|ribbon|bell|saddle|blanket|harness|leash|scarf|hat)\b/;
+  const re = new RegExp(`\\b(?:${COLOUR_PATTERN})\\b`, 'gi');
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (!accessory.test(text.slice(m.index + m[0].length, m.index + m[0].length + 18))) return true;
+  }
+  return false;
+}
+
+export function descriptorTraits(entry: CharacterSheetEntry): DescriptorTraits {
+  const d = (entry.descriptor ?? '').toLowerCase();
+  const hair =
+    /\bbald\b/.test(d) ||
+    colourBefore(d, ['hair(?:ed)?', 'pigtails?', 'braids?', 'ponytail', 'curls', 'hijab', 'turban', 'headscarf']);
+  const skin = colourBefore(d, ['skin(?:ned)?', 'complexion']);
+  const outfit = colourBefore(d, GARMENT_ANCHORS);
+  const coat = entry.isAnimal
+    ? colourBefore(d, ['fur', 'coat', 'feathers', 'scales', 'mane']) ||
+      /\b(spotted|striped|speckled|mottled)\b/.test(d) ||
+      hasNonAccessoryColour(d)
+    : false;
+  return { hair, skin, outfit, coat };
+}
+
+/**
+ * True when a descriptor pins enough of the look to be frozen as canon:
+ * humans need hair colour, skin tone and a coloured signature outfit;
+ * animals need a coat colour. Anything thinner is used for the current
+ * prompt but goes to enrichment (and is never stored), so a storm-day
+ * "a 4 year old girl" can't become the book's permanent canon.
+ */
+export function descriptorHasFreezableLook(entry: CharacterSheetEntry): boolean {
+  const d = (entry.descriptor ?? '').trim();
+  if (d.length < MIN_CANONICAL_DESCRIPTOR) return false;
+  const t = descriptorTraits(entry);
+  return entry.isAnimal ? t.coat : t.hair && t.skin && t.outfit;
+}
+
 export function isCompleteSheet(sheet: CharacterSheet): boolean {
-  return sheet.length > 0 && sheet.every((e) => e.descriptor.trim().length >= MIN_CANONICAL_DESCRIPTOR);
+  return sheet.length > 0 && sheet.every(descriptorHasFreezableLook);
+}
+
+/**
+ * A human character's two most-drifted traits as one short phrase ("long
+ * black hair in two braids and light golden-brown skin"), lifted verbatim
+ * from the descriptor so the census can restate them at the prompt head.
+ * Null when the descriptor pins neither (nothing truthful to restate).
+ */
+export function identityPhrase(entry: CharacterSheetEntry): string | null {
+  if (entry.isAnimal) return null;
+  const d = entry.descriptor ?? '';
+  const tidy = (s: string) => s.trim().replace(/^(?:with|and|wearing)\s+/i, '').toLowerCase();
+  // Only genuine style/tone modifiers may lead the captured phrase —
+  // free-form leading words once produced "Dada has father with fair skin."
+  const HAIR_MODIFIERS = 'long|short|curly|wavy|straight|thick|thin|messy|neat|shoulder-length|chin-length|flowing|silky|coily|kinky';
+  const SKIN_MODIFIERS = 'deep|dark|light|warm|rich|pale|soft|bright|glowing|smooth|medium';
+
+  let hair: string | null = null;
+  const haired = new RegExp(`\\b(${COLOUR_PATTERN})-haired\\b`, 'i').exec(d);
+  if (haired) {
+    hair = `${haired[1].toLowerCase()} hair`;
+  } else {
+    const m = new RegExp(
+      `((?:(?:${HAIR_MODIFIERS})\\s+){0,2}(?:${COLOUR_PATTERN})\\s+(?:hair|pigtails?|braids?|ponytail|curls)(?:\\s+in\\s+[^,;]+)?)`,
+      'i'
+    ).exec(d);
+    if (m) hair = tidy(m[1]);
+  }
+
+  let skin: string | null = null;
+  const s = new RegExp(`((?:(?:${SKIN_MODIFIERS})\\s+){0,2}(?:${COLOUR_PATTERN})[A-Za-z-]*\\s+skin\\w*)`, 'i').exec(d);
+  if (s) skin = tidy(s[1]);
+
+  if (hair && skin) return `${hair} and ${skin}`;
+  return hair ?? skin;
 }
 
 /** The sheet entries whose name actually appears in a scene description. */
@@ -279,6 +390,21 @@ export function censusParts(scene: string, sheet: CharacterSheet): { lead: strin
     lead += ` or extra ${joinEnglish(animalNouns.map(pluralize))}`;
   }
   lead += '.';
+
+  // Identity reinforcement at the prompt head. The anchored appositive in
+  // the scene carries the full look, but in a solo scene with a long brief
+  // it fights every other noun — the production failure was a playground
+  // page that recast the heroine as a different child entirely (short
+  // hair, apparent boy). Restating hair + skin beside the census, where
+  // encoders listen hardest, gives the two most-drifted traits a second
+  // anchor without a cast list (which reads as MORE characters to draw).
+  const identities = humans
+    .map((e) => {
+      const phrase = identityPhrase(e);
+      return phrase ? `${e.name} has ${phrase}.` : '';
+    })
+    .filter(Boolean);
+  if (identities.length > 0) lead += ` ${identities.join(' ')}`;
 
   let separation = '';
   if (humans.length > 0 && animals.length > 0) {
@@ -467,11 +593,14 @@ function guessKindForName(name: string, text: string): { countNoun: string; isAn
 /**
  * The degraded-mode sheet, built without the LLM. User-authored cast hints
  * ("VICTORIA (4 YEAR OLD GIRL)") are ground truth — a hint-derived entry
- * carries the user's own age/species words as its descriptor and can be
- * complete enough to freeze. Without a hint, the kind is taken only from
- * prose constructions that bind it to the name. A sheet that is still weak
- * is used for the current prompt but not frozen (see isCompleteSheet), so a
- * later chapter retries the real extraction.
+ * carries the user's own age/species words as its descriptor. A hint that
+ * itself pins the look (hair/skin/outfit colours, or a coat colour) can be
+ * complete enough to freeze; a bare age/kind hint cannot (that freeze was
+ * the identity-drift bug) and becomes an enrichment target instead.
+ * Without a hint, the kind is taken only from prose constructions that
+ * bind it to the name. A sheet that is still weak is used for the current
+ * prompt but not frozen (see isCompleteSheet), so a later chapter retries
+ * the real extraction.
  */
 export function guessFallbackSheet(names: string[], text: string): CharacterSheet {
   const corpus = text || '';
@@ -541,18 +670,127 @@ For each main character return:
 - name: the exact spelling used in the text
 - countNoun: ONE short countable noun for what they are ("girl", "boy", "father", "puppy", "cat", "dragon")
 - isAnimal: true only for non-human animals or creatures
-- descriptor: ONE compact visual phrase (10-22 words) starting with "a" or "an", for example "a girl about seven years old with curly red hair, freckles, yellow overalls and red rain boots" or "a small fluffy brown puppy with floppy ears and a blue collar". ONLY things a camera can see: what they are and roughly how old, hair or fur colour and style, build, signature outfit and accessories. No personality, no feelings, no backstory.
+- descriptor: ONE compact visual phrase (12-26 words) starting with "a" or "an", for example "a girl about seven years old with fair skin and freckles, curly red hair, yellow overalls and red rain boots" or "a small fluffy brown puppy with floppy ears and a blue collar". ONLY things a camera can see. For every HUMAN the descriptor MUST state all four: (1) what they are and roughly how old, (2) skin tone, written as "(tone) skin" (e.g. "fair skin", "light golden-brown skin", "deep brown skin"), (3) hair colour AND style, (4) a signature outfit WITH its colour. For every ANIMAL: its species plus its coat colour (and markings). No personality, no feelings, no backstory.
 
 Rules:
 - If the cast list includes a user-provided description for a character ("described by the user as: …"), those facts are AUTHORITATIVE: keep their age, species, colours and build exactly, and only add compatible visual details around them. Never upgrade a 4-year-old into an older child.
+- A human descriptor with no skin tone, no hair colour, or no outfit colour is INVALID: whatever you leave unspecified, the illustrator re-invents differently on every page — the production failure was one heroine with ginger hair on page 1, drawn as a boy on page 3, and a different skin tone on page 8, all from the descriptor "a 4 year old girl".
 - For young children, state their PHYSICAL SCALE next to adults inside the descriptor (e.g. "a tiny 4-year-old girl, only as tall as an adult's knee, …") — image models honour relative size far better than an age number alone, and without it they draw toddlers adult-sized.
 - Take appearance details from the text whenever the text gives them — copy its colours, clothing and species exactly. Never contradict the text, and never change an animal into a different animal.
 - Where the text gives no look for a character, INVENT a distinctive, memorable one that fits the story. This is the one moment invention is allowed: afterwards the sheet is frozen for the whole book.
 - Every character in the cast list MUST get an entry, with the exact cast spelling of their name. Do not add characters who are not in the cast list. If the cast list is empty, identify the main characters from the text yourself (maximum 4).
-- An animal companion's descriptor MUST state its species plainly ("a fluffy brown puppy" — never "a loyal little friend").
+- An animal companion's descriptor MUST state its species and coat colour plainly ("a fluffy brown puppy" — never "a loyal little friend").
 
 Output ONLY a JSON array, no other text:
 [{"name":"...","countNoun":"...","isAnimal":false,"descriptor":"a ..."}]`;
+
+const ENRICH_SYSTEM_PROMPT = `You maintain the frozen character sheet for an illustrated children's book. Some entries are missing appearance details, and whatever a descriptor leaves unspecified the illustrator re-invents differently on every page — one book's heroine changed hair colour, skin tone and even apparent gender between pages because her descriptor only said "a 4 year old girl".
+
+For each character listed, return the entry with its descriptor EXPANDED:
+- Keep every fact already in the descriptor (age, species, colours, clothing, scale phrases like "only as tall as an adult's knee") — word for word where you can. Anything after "described by the user as:" is AUTHORITATIVE and must survive exactly.
+- ADD only the missing details named for that character. Humans need: hair colour and style; skin tone written as "(tone) skin" (e.g. "fair skin", "light golden-brown skin", "deep brown skin"); a signature outfit with its colour. Animals need: coat colour (and markings if natural).
+- Invent distinctive, story-appropriate details for anything unspecified — afterwards the sheet is frozen for the whole book.
+- NEVER change a character's age, gender, species or name, and never contradict the story text.
+
+Output ONLY a JSON array, no other text:
+[{"name":"...","countNoun":"...","isAnimal":false,"descriptor":"a ..."}]`;
+
+function missingTraitLabels(entry: CharacterSheetEntry): string {
+  const t = descriptorTraits(entry);
+  if (entry.isAnimal) return t.coat ? '' : 'coat colour';
+  const missing = [
+    !t.hair && 'hair colour and style',
+    !t.skin && 'skin tone',
+    !t.outfit && 'signature outfit with its colour',
+  ].filter(Boolean);
+  return missing.join(', ');
+}
+
+/**
+ * Pin the identity traits a thin descriptor left unspecified, with one LLM
+ * call that INVENTS the missing details once (they are then frozen with
+ * the sheet) while keeping every existing fact. This is the self-healing
+ * path for storm-day fallback sheets ("a 4 year old girl"), for extractions
+ * that forgot skin tone, and for books whose sheets froze under the old
+ * length-only gate. Best-effort and never throws: on any failure the input
+ * sheet comes back untouched. A rewrite that would REMOVE an
+ * already-pinned trait is rejected entry-by-entry — trading one drift for
+ * another is not an upgrade. Kind (countNoun/isAnimal) is never taken
+ * from the enrichment reply: species safety outranks the LLM's opinion.
+ */
+export async function enrichCharacterSheet(
+  sheet: CharacterSheet,
+  opts: { names?: string[]; description?: string | null; sampleProse?: string | null } = {}
+): Promise<CharacterSheet> {
+  const thin = sheet.filter((e) => !descriptorHasFreezableLook(e));
+  if (thin.length === 0) return sheet;
+
+  try {
+    const hints = new Map<string, string>();
+    for (const raw of opts.names ?? []) {
+      const { name, hint } = parseCastEntry(raw ?? '');
+      if (name && hint) hints.set(name.toLowerCase(), hint);
+    }
+
+    const castBlock = thin
+      .map((e) => {
+        const hint = hints.get(e.name.toLowerCase());
+        return `- ${e.name} (${e.isAnimal ? 'animal' : 'human'} ${e.countNoun}) — current descriptor: "${e.descriptor || '(none)'}" — missing: ${missingTraitLabels(e) || 'more specific appearance detail'}${hint ? ` — described by the user as: ${hint}` : ''}`;
+      })
+      .join('\n');
+
+    const description = (opts.description ?? '').trim();
+    const prose = (opts.sampleProse ?? '').trim();
+    const userPrompt = [
+      'Characters whose descriptors are missing appearance details:',
+      castBlock,
+      description ? `\nBook description:\n${description.slice(0, 1200)}` : '',
+      prose ? `\nStory text:\n${selectChapterExcerpt(prose, 3000)}` : '',
+    ].join('\n');
+
+    const enrichCall = askLLMWithFallback(ENRICH_SYSTEM_PROMPT, userPrompt, 0.3, 700);
+    enrichCall.catch(() => undefined);
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutCall = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Character sheet enrichment timed out')), 30_000);
+    });
+
+    let raw: string;
+    try {
+      raw = await Promise.race([enrichCall, timeoutCall]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+
+    const enriched = parseSheetJson(raw);
+    if (enriched.length === 0) return sheet;
+
+    const byLowerName = new Map(enriched.map((e) => [parseCastEntry(e.name).name.toLowerCase(), e]));
+    const applied: string[] = [];
+    const out = sheet.map((entry) => {
+      if (descriptorHasFreezableLook(entry)) return entry;
+      const candidate = byLowerName.get(entry.name.toLowerCase())?.descriptor?.trim();
+      if (!candidate) return entry;
+      const before = descriptorTraits(entry);
+      const after = descriptorTraits({ ...entry, descriptor: candidate });
+      const regressed = (Object.keys(before) as Array<keyof DescriptorTraits>).some((k) => before[k] && !after[k]);
+      if (regressed) return entry;
+      applied.push(entry.name);
+      return { ...entry, descriptor: candidate };
+    });
+    if (applied.length > 0) {
+      console.log(`[CharacterSheet] Enriched thin descriptors with pinned traits: ${applied.join(', ')}`);
+    }
+    return out;
+  } catch (e) {
+    console.warn(
+      '[CharacterSheet] Enrichment failed (non-fatal, sheet used as-is):',
+      e instanceof Error ? e.message : e
+    );
+    return sheet;
+  }
+}
 
 /**
  * Build the canonical sheet from the book setup (cast + description) and a
@@ -584,6 +822,7 @@ export async function buildCharacterSheet(opts: {
   const description = (opts.description ?? '').trim();
   const prose = (opts.sampleProse ?? '').trim();
   const fallback = guessFallbackSheet(opts.names ?? [], `${description}\n${prose}`);
+  const enrichOpts = { names: opts.names, description: opts.description, sampleProse: prose };
 
   if (!description && !prose) return fallback;
 
@@ -618,9 +857,9 @@ export async function buildCharacterSheet(opts: {
       const extracted = parseSheetJson(raw);
       if (extracted.length === 0) {
         console.warn('[CharacterSheet] Extraction returned no usable entries, using guessed sheet');
-        return fallback;
+        return enrichCharacterSheet(fallback, enrichOpts);
       }
-      if (names.length === 0) return extracted.slice(0, 4);
+      if (names.length === 0) return enrichCharacterSheet(extracted.slice(0, 4), enrichOpts);
 
       // The cast list is authoritative: keep only its characters (under the
       // cast's clean name) and backfill anyone the LLM dropped with their
@@ -629,10 +868,13 @@ export async function buildCharacterSheet(opts: {
       // decorated spec back as the "name".
       const byLowerName = new Map(extracted.map((e) => [parseCastEntry(e.name).name.toLowerCase(), e]));
       const fallbackByName = new Map(fallback.map((e) => [e.name.toLowerCase(), e]));
-      return names.map((name) => {
+      const merged = names.map((name) => {
         const hit = byLowerName.get(name.toLowerCase());
         return hit ? { ...hit, name } : (fallbackByName.get(name.toLowerCase()) ?? { name, countNoun: 'character', isAnimal: false, descriptor: '' });
       });
+      // Pin any identity traits the extraction still left unspecified
+      // (skin tone is the repeat offender) before this sheet can freeze.
+      return enrichCharacterSheet(merged, enrichOpts);
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -641,7 +883,10 @@ export async function buildCharacterSheet(opts: {
       '[CharacterSheet] Extraction LLM call failed, using guessed sheet:',
       e instanceof Error ? e.message : e
     );
-    return fallback;
+    // Even on a storm-day fallback, give enrichment one chance to pin the
+    // traits the hints don't carry — a shorter, narrower ask sometimes
+    // lands when the full extraction timed out.
+    return enrichCharacterSheet(fallback, enrichOpts);
   }
 }
 
@@ -662,7 +907,31 @@ export async function ensureCharacterSheet(bookId: string, sampleProse?: string)
     if (!book) return [];
 
     const existing = parseCharacterSheet(book.characterSheet);
-    if (existing.length > 0) return existing;
+    if (existing.length > 0) {
+      if (isCompleteSheet(existing)) return existing;
+      // Frozen under the old length-only gate (or written before trait
+      // coverage existed): a stored "a 4 year old girl" re-invents the
+      // heroine on every remaining page of this book. Upgrade it in
+      // place — enrichment keeps every existing fact and pins only the
+      // missing traits — and store the result once it passes the
+      // coverage gate. Until then the upgraded-but-unstored sheet is
+      // still used for this job, and the next job retries.
+      const upgraded = await enrichCharacterSheet(existing, {
+        names: Array.isArray(book.characterNames) ? (book.characterNames as string[]) : [],
+        description: book.description,
+        sampleProse,
+      });
+      if (isCompleteSheet(upgraded)) {
+        await db.book.update({
+          where: { id: bookId },
+          data: { characterSheet: serializeCharacterSheet(upgraded) },
+        });
+        console.log(
+          `[CharacterSheet] Upgraded stored sheet for book ${bookId} with pinned traits: ${upgraded.map((e) => e.name).join(', ')}`
+        );
+      }
+      return upgraded;
+    }
 
     let prose = sampleProse?.trim() || '';
     if (!prose) {

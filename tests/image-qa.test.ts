@@ -60,6 +60,13 @@ describe('buildQAPrompt', () => {
     expect(system).toMatch(/exactly once/i);
     expect(system).toMatch(/wrong species/i);
     expect(system).toMatch(/ONLY a JSON object/i);
+    // Identity checks added after a book shipped the heroine as a ginger,
+    // then a boy, then a different skin tone — QA's old checklist never
+    // asked, so even checked frames sailed through.
+    expect(system).toMatch(/drawn as a boy/i);
+    expect(system).toMatch(/hair colour/i);
+    expect(system).toMatch(/skin tone/i);
+    expect(system).toMatch(/no lighting could explain/i);
   });
 });
 
@@ -163,5 +170,17 @@ describe('verifyIllustration', () => {
     expect(mockFetch).toHaveBeenCalledTimes(3);
     const thirdBody = JSON.parse((mockFetch.mock.calls[2][1] as { body: string }).body);
     expect(thirdBody.model).toBe('google/gemma-4-31b-it:free');
+  });
+
+  it('rejects an identity swap (the production playground recast)', async () => {
+    // Census-perfect frame — one child, right scene — but the heroine was
+    // recast as a different child. The round-3 checklist waved this through
+    // because it never asked about gender, hair or skin.
+    mockFetch.mockResolvedValue(
+      chatResponse('{"match": false, "problems": ["the girl is drawn as a boy with short ginger hair instead of a girl with long black braids"]}')
+    );
+    const result = await verifyIllustration({ imageUrl: IMAGE_URL, scene: SCENE, cast: CAST });
+    expect(result).toMatchObject({ accept: false, checked: true });
+    expect(result.reason).toContain('boy');
   });
 });
