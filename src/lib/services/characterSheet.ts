@@ -306,9 +306,90 @@ export function identityPhrase(entry: CharacterSheetEntry): string | null {
   return hair ?? skin;
 }
 
-/** The sheet entries whose name actually appears in a scene description. */
+/**
+ * Family-term aliases. The cast spec and the prose routinely disagree on
+ * what a parent is called — production: cast "MAMMA", prose "MAMA has a
+ * big smile" — and exact-name matching then never sees her: no anchor, no
+ * census entry, no QA presence, and the census's "no extra people"
+ * actively omits her book-wide. Family words are therefore matched as a
+ * group: any variant in the text counts as a mention of the entry.
+ * Scoped to family terms only (real names still match exactly), and an
+ * exact-name mention always outranks an alias claim (see presentInScene).
+ */
+const FAMILY_ALIAS_GROUPS: Array<{ countNoun: string; variants: string[] }> = [
+  { countNoun: 'mother', variants: ['mama', 'mamma', 'mommy', 'mummy', 'mum', 'mom', 'mam', 'mother'] },
+  { countNoun: 'father', variants: ['dada', 'daddy', 'papa', 'dad', 'father'] },
+  { countNoun: 'grandmother', variants: ['grandma', 'granny', 'grannie', 'nana', 'nanna', 'grandmother'] },
+  { countNoun: 'grandfather', variants: ['grandpa', 'grandad', 'gramps', 'grandfather'] },
+];
+
+/** Every spelling that may refer to this entry in prose (just itself unless it is a family term). */
+export function nameVariants(name: string): string[] {
+  const lower = name.trim().toLowerCase();
+  const group = FAMILY_ALIAS_GROUPS.find((g) => g.variants.includes(lower));
+  return group ? [...group.variants] : [lower];
+}
+
+/** Identity key for name matching: family variants collapse to one key. */
+export function canonicalNameKey(name: string): string {
+  const lower = name.trim().toLowerCase();
+  const group = FAMILY_ALIAS_GROUPS.find((g) => g.variants.includes(lower));
+  return group ? `family:${group.countNoun}` : lower;
+}
+
+/** Look up `name` in a map keyed by lowercase names, falling back to a family-alias match. */
+function findByCastName<T>(entries: Map<string, T>, name: string): T | undefined {
+  const exact = entries.get(name.toLowerCase());
+  if (exact) return exact;
+  const key = canonicalNameKey(name);
+  if (!key.startsWith('family:')) return undefined;
+  for (const [k, v] of entries) {
+    if (canonicalNameKey(k) === key) return v;
+  }
+  return undefined;
+}
+
+/**
+ * Mention patterns for family words used as NAMES (title-case, shout-case,
+ * or possessive stems) — never bare common nouns, so "the mother goose"
+ * can't summon (or anchor) the mother. Returned fresh each call: the
+ * patterns carry the stateful `g` flag.
+ */
+function familyMentionPatterns(variants: string[]): RegExp[] {
+  const titled = (v: string) => v.charAt(0).toUpperCase() + v.slice(1);
+  const tokens = variants.flatMap((v) => [titled(v), v.toUpperCase()]).map(escapeRegExp);
+  return [
+    new RegExp(`\\b(?:${tokens.join('|')})\\b`, 'g'),
+    new RegExp(`\\b(?:${variants.map(escapeRegExp).join('|')})(?=['’]s\\b)`, 'gi'),
+  ];
+}
+
+function nameFormMentioned(text: string, variant: string): boolean {
+  return familyMentionPatterns([variant]).some((re) => re.test(text));
+}
+
+/**
+ * The sheet entries whose name appears in a scene description. Ordinary
+ * names match at any casing (toddler-book prose shouts them); family-term
+ * entries additionally claim their sibling spellings ("MAMA" in the prose,
+ * "MAMMA" in the cast) but only in name form, and an own-name mention
+ * always outranks a sibling's alias claim — one mother in the text must
+ * never census as two people.
+ */
 export function presentInScene(scene: string, sheet: CharacterSheet): CharacterSheetEntry[] {
-  return sheet.filter((entry) => new RegExp(`\\b${escapeRegExp(entry.name)}\\b`, 'i').test(scene));
+  const ownNameMentioned = (entry: CharacterSheetEntry): boolean =>
+    nameVariants(entry.name).length === 1
+      ? new RegExp(`\\b${escapeRegExp(entry.name)}\\b`, 'i').test(scene)
+      : nameFormMentioned(scene, entry.name.toLowerCase());
+  const exact = new Set(sheet.filter(ownNameMentioned));
+  const exactGroups = new Set([...exact].map((e) => canonicalNameKey(e.name)));
+  return sheet.filter((entry) => {
+    if (exact.has(entry)) return true;
+    if (exactGroups.has(canonicalNameKey(entry.name))) return false;
+    return nameVariants(entry.name)
+      .filter((v) => v !== entry.name.toLowerCase())
+      .some((v) => nameFormMentioned(scene, v));
+  });
 }
 
 /**
@@ -326,13 +407,27 @@ export function anchorSceneWithSheet(scene: string, sheet: CharacterSheet): stri
     if (!descriptor || descriptor.length < MIN_ANCHOR_DESCRIPTOR) continue;
     if (normalizeForCompare(result).includes(normalizeForCompare(descriptor))) continue;
 
-    // Case-insensitive: toddler-book prose (and briefs echoing it) shout
-    // names — "TRUFFLE sees the fish" — and a case-sensitive pattern silently
-    // anchored nothing on exactly those pages.
-    const namePattern = new RegExp(`\\b${escapeRegExp(entry.name)}\\b`, 'gi');
-    let match: RegExpExecArray | null;
-    while ((match = namePattern.exec(result)) !== null) {
-      const end = match.index + match[0].length;
+    // Mention candidates, earliest first. Ordinary names match at any
+    // casing — toddler-book prose (and briefs echoing it) shout names,
+    // "TRUFFLE sees the fish", and a case-sensitive pattern silently
+    // anchored nothing on exactly those pages. Family-term entries must
+    // ALSO catch their prose spellings ("MAMA" for cast "MAMMA"), but only
+    // where the word is used as a name — a bare common noun ("the mother
+    // goose") is never an anchor site.
+    const variants = nameVariants(entry.name);
+    const candidates: Array<{ index: number; length: number }> = [];
+    if (variants.length === 1) {
+      const namePattern = new RegExp(`\\b${escapeRegExp(entry.name)}\\b`, 'gi');
+      for (const m of result.matchAll(namePattern)) candidates.push({ index: m.index, length: m[0].length });
+    } else {
+      for (const re of familyMentionPatterns(variants)) {
+        for (const m of result.matchAll(re)) candidates.push({ index: m.index, length: m[0].length });
+      }
+      candidates.sort((a, b) => a.index - b.index);
+    }
+
+    for (const { index, length } of candidates) {
+      const end = index + length;
       const after = result.slice(end, end + 14);
       // "Victoria's puppy" — a possessive is not a place to describe Victoria.
       if (/^['’]s\b/.test(after)) continue;
@@ -503,9 +598,9 @@ const PERSON_HINTS: Array<{ countNoun: string; nouns: string[] }> = [
   { countNoun: 'sister', nouns: ['sister'] },
   { countNoun: 'brother', nouns: ['brother'] },
   { countNoun: 'father', nouns: ['father', 'dad', 'dada', 'papa', 'daddy'] },
-  { countNoun: 'mother', nouns: ['mother', 'mom', 'mum', 'mama', 'mommy', 'mummy'] },
-  { countNoun: 'grandmother', nouns: ['grandmother', 'grandma', 'granny', 'nana'] },
-  { countNoun: 'grandfather', nouns: ['grandfather', 'grandpa'] },
+  { countNoun: 'mother', nouns: ['mother', 'mom', 'mum', 'mama', 'mamma', 'mam', 'mommy', 'mummy'] },
+  { countNoun: 'grandmother', nouns: ['grandmother', 'grandma', 'granny', 'grannie', 'nana', 'nanna'] },
+  { countNoun: 'grandfather', nouns: ['grandfather', 'grandpa', 'grandad', 'gramps'] },
   { countNoun: 'princess', nouns: ['princess'] },
   { countNoun: 'prince', nouns: ['prince'] },
   { countNoun: 'woman', nouns: ['woman', 'lady'] },
@@ -590,6 +685,12 @@ function guessKindForName(name: string, text: string): { countNoun: string; isAn
   return null;
 }
 
+/** A family-term NAME is itself kind evidence ("Mama" the character is the mother). */
+function kindFromName(name: string): { countNoun: string; isAnimal: boolean } | null {
+  const group = FAMILY_ALIAS_GROUPS.find((g) => g.variants.includes(name.trim().toLowerCase()));
+  return group ? { countNoun: group.countNoun, isAnimal: false } : null;
+}
+
 /**
  * The degraded-mode sheet, built without the LLM. User-authored cast hints
  * ("VICTORIA (4 YEAR OLD GIRL)") are ground truth — a hint-derived entry
@@ -617,9 +718,11 @@ export function guessFallbackSheet(names: string[], text: string): CharacterShee
     if (hint) {
       // A hint can be idiomatic about the animal/person axis ("the bestest
       // boy" is a dog); strict prose evidence ("Truffle barked") outranks it
-      // there. The descriptor still comes from the user's own words.
+      // there. The descriptor still comes from the user's own words. Last
+      // resort, a family-term name is its own kind ("MAMA" with a look-only
+      // hint still censuses as a mother, not "a character").
       const proseKind = guessKindForName(name, corpus);
-      const kind = proseKind?.isAnimal ? proseKind : (kindFromHintText(hint) ?? proseKind);
+      const kind = proseKind?.isAnimal ? proseKind : (kindFromHintText(hint) ?? proseKind ?? kindFromName(name));
       sheet.push({
         name,
         countNoun: kind?.countNoun ?? 'character',
@@ -627,7 +730,7 @@ export function guessFallbackSheet(names: string[], text: string): CharacterShee
         descriptor: normalizeDescriptor(hint.toLowerCase()),
       });
     } else {
-      const kind = guessKindForName(name, corpus);
+      const kind = guessKindForName(name, corpus) ?? kindFromName(name);
       sheet.push(
         kind
           ? { name, countNoun: kind.countNoun, isAnimal: kind.isAnimal, descriptor: `a ${kind.countNoun}` }
@@ -678,7 +781,7 @@ Rules:
 - For young children, state their PHYSICAL SCALE next to adults inside the descriptor (e.g. "a tiny 4-year-old girl, only as tall as an adult's knee, …") — image models honour relative size far better than an age number alone, and without it they draw toddlers adult-sized.
 - Take appearance details from the text whenever the text gives them — copy its colours, clothing and species exactly. Never contradict the text, and never change an animal into a different animal.
 - Where the text gives no look for a character, INVENT a distinctive, memorable one that fits the story. This is the one moment invention is allowed: afterwards the sheet is frozen for the whole book.
-- Every character in the cast list MUST get an entry, with the exact cast spelling of their name. Do not add characters who are not in the cast list. If the cast list is empty, identify the main characters from the text yourself (maximum 4).
+- Every character in the cast list MUST get an entry, with the exact cast spelling of their name. You may ALSO include other clearly-named recurring characters the story text itself names (cast lists forget people — one book's mother was named in chapter after chapter but never in the cast, and vanished from every picture) — only characters the text actually names, spelled as the text spells them; never invent characters the text doesn't mention. If the cast list is empty, identify the main characters from the text yourself (maximum 4).
 - An animal companion's descriptor MUST state its species and coat colour plainly ("a fluffy brown puppy" — never "a loyal little friend").
 
 Output ONLY a JSON array, no other text:
@@ -770,7 +873,7 @@ export async function enrichCharacterSheet(
     const applied: string[] = [];
     const out = sheet.map((entry) => {
       if (descriptorHasFreezableLook(entry)) return entry;
-      const candidate = byLowerName.get(entry.name.toLowerCase())?.descriptor?.trim();
+      const candidate = findByCastName(byLowerName, entry.name)?.descriptor?.trim();
       if (!candidate) return entry;
       const before = descriptorTraits(entry);
       const after = descriptorTraits({ ...entry, descriptor: candidate });
@@ -861,20 +964,44 @@ export async function buildCharacterSheet(opts: {
       }
       if (names.length === 0) return enrichCharacterSheet(extracted.slice(0, 4), enrichOpts);
 
-      // The cast list is authoritative: keep only its characters (under the
-      // cast's clean name) and backfill anyone the LLM dropped with their
-      // guessed entry, so nobody loses their anchor. Extracted names are
-      // run through the same cast parser, in case a model echoes a
-      // decorated spec back as the "name".
+      // The cast list is authoritative for its own characters (under the
+      // cast's clean name, family-variant spellings unified) and anyone
+      // the LLM dropped is backfilled with their guessed entry, so nobody
+      // loses their anchor. Extracted names are run through the same cast
+      // parser, in case a model echoes a decorated spec back as the "name".
       const byLowerName = new Map(extracted.map((e) => [parseCastEntry(e.name).name.toLowerCase(), e]));
       const fallbackByName = new Map(fallback.map((e) => [e.name.toLowerCase(), e]));
       const merged = names.map((name) => {
-        const hit = byLowerName.get(name.toLowerCase());
+        const hit = findByCastName(byLowerName, name);
         return hit ? { ...hit, name } : (fallbackByName.get(name.toLowerCase()) ?? { name, countNoun: 'character', isAnimal: false, descriptor: '' });
       });
+
+      // Adopt recurring characters the PROSE names but the cast forgot
+      // (production: "MAMA has a big smile" in chapter after chapter,
+      // never in characterNames — with no sheet entry she got no anchor
+      // and no census line, and vanished from every picture). Evidence
+      // required: the name (or a family variant) must literally appear
+      // in the text the extraction read; characters the model invented
+      // out of nowhere are still dropped.
+      const corpus = `${description}\n${prose}`;
+      const adopted: CharacterSheetEntry[] = [];
+      for (const e of extracted) {
+        if (merged.length + adopted.length >= 6) break;
+        const clean = parseCastEntry(e.name).name;
+        if (!clean) continue;
+        const already = [...merged, ...adopted].some((m) => canonicalNameKey(m.name) === canonicalNameKey(clean));
+        if (already) continue;
+        const evidenced = nameVariants(clean).some((v) => new RegExp(`\\b${escapeRegExp(v)}\\b`, 'i').test(corpus));
+        if (!evidenced) continue;
+        adopted.push({ ...e, name: clean });
+      }
+      if (adopted.length > 0) {
+        console.log(`[CharacterSheet] Adopted prose character(s) missing from cast: ${adopted.map((e) => e.name).join(', ')}`);
+      }
+
       // Pin any identity traits the extraction still left unspecified
       // (skin tone is the repeat offender) before this sheet can freeze.
-      return enrichCharacterSheet(merged, enrichOpts);
+      return enrichCharacterSheet([...merged, ...adopted], enrichOpts);
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -883,9 +1010,13 @@ export async function buildCharacterSheet(opts: {
       '[CharacterSheet] Extraction LLM call failed, using guessed sheet:',
       e instanceof Error ? e.message : e
     );
-    // Even on a storm-day fallback, give enrichment one chance to pin the
-    // traits the hints don't carry — a shorter, narrower ask sometimes
-    // lands when the full extraction timed out.
+    // When the extraction lost to its own 30s timeout the providers are
+    // down, and in production the enrichment call timed out right behind
+    // it — ~60s of every storm-day chapter burned inside the claim
+    // budget. Skip enrichment then. On fast failures (an all-502 sweep)
+    // still give it one chance: a shorter, narrower ask sometimes lands
+    // when the full extraction didn't.
+    if (e instanceof Error && /extraction timed out/i.test(e.message)) return fallback;
     return enrichCharacterSheet(fallback, enrichOpts);
   }
 }

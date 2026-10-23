@@ -183,4 +183,19 @@ describe('verifyIllustration', () => {
     expect(result).toMatchObject({ accept: false, checked: true });
     expect(result.reason).toContain('boy');
   });
+
+  it('tells the judge clothing is never a failure (outfit churn burned paid frames)', () => {
+    // Production: frames rejected for "capri pants, not denim shorts" and
+    // "white t-shirt instead of pink" while the right girl stood there.
+    const { system } = buildQAPrompt(SCENE, CAST);
+    expect(system).toMatch(/clothing is never a failure/i);
+    expect(system).toMatch(/not a uniform/i);
+    expect(system).toMatch(/judge identity by gender, hair, skin/i);
+  });
+
+  it('protects scene-named people who are not in the expected cast', () => {
+    const { system } = buildQAPrompt(SCENE, CAST);
+    expect(system).toMatch(/neither listed nor named in the scene description/i);
+    expect(system).toMatch(/missing from the expected list is not an "extra"/i);
+  });
 });

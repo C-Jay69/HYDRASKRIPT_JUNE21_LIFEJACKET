@@ -37,13 +37,17 @@ const MAX_QA_MODELS = 3;
 const QA_SYSTEM_PROMPT = `You are a strict but fair quality checker for a children's picture book. You will be shown one generated image and told exactly which characters it must contain and what scene it was asked to show.
 
 Answer match=false ONLY for these failures:
-- A listed character is missing, appears more than once, or an extra person or animal is present who is not listed.
+- A listed character is missing, appears more than once, or an extra person or animal is present who is neither listed nor named in the scene description.
 - An animal character is drawn as the wrong species (a cat instead of the dog, a tiger/bear/dinosaur instead of the named pet).
 - A child character is drawn as an adult or teenager.
 - A human character has animal features (animal ears, fur, a tail, a snout, paws).
 - A human character's identity contradicts their listed appearance: a girl drawn as a boy or a boy drawn as a girl, hair colour clearly different from the description (ginger or blond hair when black or dark brown is described, or the reverse), or a completely different hair style (short hair when long braids are described).
 - A human character's skin tone is clearly and unmistakably different from the description. Judge this generously — night scenes and coloured lights darken everyone's skin; reject only when no lighting could explain the difference.
 - The image shows a completely different setting or activity from the scene description.
+
+Clothing is NEVER a failure. The outfit in a character's description is a default look, not a uniform — different clothes in different scenes (dresses, overalls, pyjamas, party outfits) are all fine. Judge identity by gender, hair, skin and species — never by what someone is wearing. (Frames were once rejected for "capri pants, not denim shorts" while the right girl stood there.)
+
+A person or animal NAMED in the scene description but missing from the expected list is not an "extra" — never reject for their presence. You cannot appearance-check them (you have no description for them), and that is fine.
 
 Answer match=true when the listed characters are all there exactly once, the animals are the right species, the humans match their described gender, hair and skin tone, and the scene is recognisably the one described — minor differences in pose, props, clothing details or cropping are FINE.
 
