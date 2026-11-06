@@ -10,6 +10,7 @@
 import {
   classifySizeError,
   nearestAspectRatio,
+  parseAcceptedTierIndex,
   parseMinimumPixels,
   tierIndexForResolution,
   RESOLUTION_TIERS,
@@ -51,6 +52,37 @@ describe('parseMinimumPixels + classifySizeError', () => {
     expect(classifySizeError('Unsupported parameter: resolution')).toBeNull();
     expect(classifySizeError('Invalid API key')).toBeNull();
     expect(parseMinimumPixels('Invalid API key')).toBeNull();
+  });
+
+  it('reads "resolution not supported" as a tier ceiling', () => {
+    // The flash-lite-image 400 from production: the model rejects the 2K
+    // tier, not the parameter — step down instead of stripping fields.
+    expect(
+      classifySizeError('Parameters invalid: parameters.resolution must be valid resolution option: not supported. Accepted: 1K')
+    ).toBe('too-large');
+    expect(classifySizeError('resolution not supported for this model')).toBe('too-large');
+    // ...but an "unsupported parameter" rejection still goes to the strip ladder:
+    expect(classifySizeError('Unsupported parameter: resolution')).toBeNull();
+  });
+});
+
+describe('parseAcceptedTierIndex', () => {
+  it('reads the provider-named tier (the flash-lite-image rejection)', () => {
+    expect(
+      RESOLUTION_TIERS[parseAcceptedTierIndex('parameters.resolution must be valid resolution option: not supported. Accepted: 1K') ?? -1]
+    ).toBe('1K');
+    expect(RESOLUTION_TIERS[parseAcceptedTierIndex('Resolution not supported. Supported resolutions: 512, 1K, 2K') ?? -1]).toBe('2K');
+    expect(RESOLUTION_TIERS[parseAcceptedTierIndex('valid values are 1K and 2K') ?? -1]).toBe('2K');
+  });
+
+  it('stays out of the way when no resolutions are named', () => {
+    expect(parseAcceptedTierIndex('Unsupported parameter: resolution')).toBeNull();
+    expect(parseAcceptedTierIndex('Invalid API key')).toBeNull();
+  });
+
+  it('does not undercut a pixel floor (Seedream)', () => {
+    const floor = 'requires at least 3,686,400 output pixels; use a larger size such as "2048x2048"';
+    expect(parseAcceptedTierIndex(floor)).toBeNull();
   });
 });
 

@@ -61,10 +61,39 @@ export function parseMinimumPixels(errorMsg: string): number | null {
 }
 
 /**
+ * The resolution tier a provider NAMED as acceptable in its rejection,
+ * e.g. Gemini flash-lite-image's "resolution: not supported. Accepted:
+ * 1K" — returned as an index into RESOLUTION_TIERS so the caller can jump
+ * straight to it. Tiers below our ladder (512/768) clamp to '1K'. Null
+ * when the message names no accepted tier.
+ */
+export function parseAcceptedTierIndex(errorMsg: string): number | null {
+  // Require an acceptance lead-in ("Accepted: 1K", "Supported resolutions:
+  // 512, 1K, 2K", "valid values are 1K and 2K") so stray numbers elsewhere
+  // in an error can't steer sizing. Word boundaries keep "Unsupported
+  // parameter" from matching as an acceptance.
+  const match =
+    /\b(?:accepted|supported|valid|allowed)\b[^.]*?((?:\d+(?:\.\d+)?K|512|768)(?:\s*(?:,|or|and)\s*(?:\d+(?:\.\d+)?K|512|768))*)/i.exec(errorMsg);
+  if (!match) return null;
+  // When several tiers are named, take the largest our ladder knows;
+  // sub-ladder tokens (512/768) clamp to the bottom tier.
+  const tiers = match[1].match(/\d+(?:\.\d+)?K|512|768/gi) ?? [];
+  let best: number | null = null;
+  for (const tier of tiers) {
+    const idx = (RESOLUTION_TIERS as readonly string[]).indexOf(tier.toUpperCase());
+    const clamped = idx >= 0 ? idx : 0;
+    best = best === null ? clamped : Math.max(best, clamped);
+  }
+  return best;
+}
+
+/**
  * Which way a size rejection wants the canvas moved. Deliberately narrow:
- * generic "unsupported resolution parameter" errors must return null so the
+ * generic "unsupported parameter" errors must return null so the
  * strip-level ladder (drop optional fields → bare request) handles them
- * instead of the tier walk.
+ * instead of the tier walk. (Rejections that NAME an accepted tier are
+ * handled before this via parseAcceptedTierIndex; a bare "resolution …
+ * not supported" reads as a ceiling and steps down.)
  */
 export function classifySizeError(errorMsg: string): 'too-small' | 'too-large' | null {
   if (
@@ -80,7 +109,8 @@ export function classifySizeError(errorMsg: string): 'too-small' | 'too-large' |
     /\btoo large\b/i.test(errorMsg) ||
     /smaller (?:size|resolution|canvas)/i.test(errorMsg) ||
     /maximum[^.]*\b(?:size|resolution|pixels|dimensions?)\b/i.test(errorMsg) ||
-    /exceeds?[^.]*\b(?:size|resolution|pixels)\b/i.test(errorMsg)
+    /exceeds?[^.]*\b(?:size|resolution|pixels)\b/i.test(errorMsg) ||
+    /resolution[^.]{0,40}\bnot supported\b/i.test(errorMsg)
   ) {
     return 'too-large';
   }
