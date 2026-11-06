@@ -41,3 +41,6 @@ dev.log
 
 # preview script output (scripts/preview-storybook.ts)
 storybook-preview.pdf
+
+# TypeScript incremental build cache
+*.tsbuildinfo
