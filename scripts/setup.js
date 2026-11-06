@@ -12,9 +12,9 @@ const examplePath = path.join(root, '.env.example');
 if (!fs.existsSync(envPath)) {
   if (fs.existsSync(examplePath)) {
     fs.copyFileSync(examplePath, envPath);
-    console.log('[setup] Created .env from .env.example (Postgres DATABASE_URL placeholder). Edit it with your Supabase credentials before running db push.');
+    console.log('[setup] Created .env from .env.example (Postgres DATABASE_URL placeholder). Point DATABASE_URL at your Postgres instance before running db push.');
   } else {
-    console.log('[setup] No .env or .env.example found. Create .env with your Supabase Postgres DATABASE_URL.');
+    console.log('[setup] No .env or .env.example found. Create .env with your Postgres DATABASE_URL.');
   }
 } else {
   console.log('[setup] .env already exists — skipping creation.');

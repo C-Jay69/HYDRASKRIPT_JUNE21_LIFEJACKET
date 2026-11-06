@@ -4,7 +4,6 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { isUnauthorizedError, requireProfile, unauthorizedResponse } from '@/lib/api-auth';
-import { supabaseAdmin } from '@/lib/supabase';
 import { generateFilename, getR2Client, isR2Enabled, getR2PublicUrl } from '@/lib/utils/storage';
 import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
@@ -58,26 +57,9 @@ export async function POST(request: NextRequest) {
 
     let uploadUrl: string;
     let publicUrl: string;
-    let storageProvider: 'supabase' | 'r2' | 'local';
+    let storageProvider: 'r2' | 'local';
 
-    const supabaseBucket = process.env.SUPABASE_STORAGE_BUCKET || 'hydraskript-assets';
-    const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-    if (supabaseUrl && supabaseServiceKey) {
-      const { data, error } = await supabaseAdmin.storage
-        .from(supabaseBucket)
-        .createSignedUploadUrl(storagePath, { upsert: false });
-
-      if (error || !data?.signedUrl) {
-        console.error('[ListingsUploadURL] Supabase signed URL failed:', error?.message);
-        throw new Error('Failed to create upload URL');
-      }
-
-      uploadUrl = data.signedUrl;
-      publicUrl = `${supabaseUrl}/storage/v1/object/public/${supabaseBucket}/${storagePath}`;
-      storageProvider = 'supabase';
-    } else if (isR2Enabled()) {
+    if (isR2Enabled()) {
       const command = new PutObjectCommand({
         Bucket: process.env.R2_BUCKET_KEY,
         Key: storagePath,

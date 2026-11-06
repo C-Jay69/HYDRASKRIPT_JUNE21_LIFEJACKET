@@ -1,69 +1,57 @@
-import { createClient } from '@supabase/supabase-js'
+// Reset an admin account's password directly in Postgres.
+//
+// Replaces the old Supabase admin listUsers/updateUserById flow. Passwords are
+// bcrypt, which is exactly what NextAuth's Credentials provider verifies.
+//
+// Usage:
+//   npx tsx scripts/reset-admin-password.ts
+//   ADMIN_EMAIL=me@example.com ADMIN_PASSWORD='...' npx tsx scripts/reset-admin-password.ts
+
 import { PrismaClient } from '@prisma/client'
 import { PrismaPg } from '@prisma/adapter-pg'
+import bcrypt from 'bcryptjs'
 import dotenv from 'dotenv'
 
 dotenv.config({ path: '.env.local' })
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY!
-
-const supabase = createClient(supabaseUrl, serviceRoleKey, {
-  auth: {
-    autoRefreshToken: false,
-    persistSession: false
-  }
-})
-
-// Create Prisma client for database updates
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL })
 const db = new PrismaClient({ adapter })
 
 async function resetAdminPassword() {
-  const email = 'admin@hydraskript.com'
-  const newPassword = 'Admin123!@#' // Change this to whatever you want
+  const email = (process.env.ADMIN_EMAIL || 'admin@hydraskript.com')
+    .trim()
+    .toLowerCase()
+  const newPassword = process.env.ADMIN_PASSWORD || 'Admin123!@#'
 
   try {
-    // First, find the user
-    const { data: users, error: listError } = await supabase.auth.admin.listUsers()
-    
-    if (listError) {
-      console.error('Error listing users:', listError)
-      return
-    }
+    const passwordHash = await bcrypt.hash(newPassword, 12)
 
-    const adminUser = users.users.find(u => u.email === email)
-    
-    if (!adminUser) {
-      console.log('Admin user not found:', email)
-      return
-    }
-
-    console.log('Found admin user:', adminUser.id, adminUser.email)
-
-    // Update the password
-    const { data, error } = await supabase.auth.admin.updateUserById(adminUser.id, {
-      password: newPassword,
-      email_confirm: true
+    const profile = await db.profile.upsert({
+      where: { email },
+      update: {
+        passwordHash,
+        isAdmin: true,
+        tier: 'studio',
+        credits: 100000,
+      },
+      create: {
+        email,
+        passwordHash,
+        name: email.split('@')[0],
+        isAdmin: true,
+        tier: 'studio',
+        credits: 100000,
+      },
     })
 
-    if (error) {
-      console.error('Error updating password:', error)
-      return
-    }
-
     console.log('✅ Password reset successfully!')
-    console.log('Email:', email)
+    console.log('Email:', profile.email)
     console.log('New Password:', newPassword)
-    console.log('User ID:', data.user?.id)
-    
-    // Also update their profile to give them max credits
-    // Use raw SQL to avoid issues with new schema fields not in DB yet
-    await db.$executeRaw`UPDATE profiles SET tier = 'studio', credits = 100000, "isAdmin" = true WHERE id = ${adminUser.id}`
-    console.log('✅ Profile updated via raw SQL')
-
+    console.log('Profile ID:', profile.id)
+    console.log('Admin:', profile.isAdmin)
   } catch (err) {
     console.error('Unexpected error:', err)
+    process.exitCode = 1
   } finally {
     await db.$disconnect()
   }

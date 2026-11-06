@@ -63,13 +63,13 @@ The app currently validates with:
 | :--- | :--- |
 | Framework | Next.js 15 (App Router) |
 | Language | TypeScript 5 |
-| Database | Supabase PostgreSQL via Prisma |
-| Auth | Supabase Auth + `@supabase/ssr` |
-| Queue | Custom Supabase/Postgres-backed persistent queue |
+| Database | PostgreSQL via Prisma 7 + `@prisma/adapter-pg` (local cluster in dev, Neon in production) |
+| Auth | NextAuth v5 (Credentials provider, JWT sessions) + bcrypt |
+| Queue | Custom Postgres-backed persistent queue |
 | AI / LLM | OpenRouter |
 | Images | Hugging Face / Replicate / FAL fallback design |
 | Audio | Google AI Studio (Gemini TTS) + FFmpeg |
-| Storage | Supabase Storage when configured, local fallback for development |
+| Storage | Cloudflare R2, local filesystem fallback for development |
 | Payments | Stripe (partially staged / verify before production) |
 
 ---
@@ -101,7 +101,7 @@ Current security posture includes:
 - Protected API routes return `401` JSON when unauthenticated
 - Protected pages redirect through auth flow when needed
 - Server-side auth helpers now back major protected routes
-- Session refresh uses Supabase SSR patterns
+- Sessions are signed JWT cookies, verified in Edge middleware by NextAuth v5
 
 ### Important note
 
@@ -112,7 +112,7 @@ This is significantly improved from the original repo state, but you should stil
 - protected API access
 - admin-only paths
 
-against your real Supabase project before public launch.
+against your real database before public launch.
 
 ---
 
@@ -121,12 +121,17 @@ against your real Supabase project before public launch.
 Create `.env.local` in the project root.
 
 ```env
-# Database / Supabase
-DATABASE_URL=postgresql://...
-NEXT_PUBLIC_SUPABASE_URL=https://xxxx.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ...
-SUPABASE_SERVICE_ROLE_KEY=eyJ...
-SUPABASE_STORAGE_BUCKET=hydraskript-assets
+# Database / Auth
+DATABASE_URL=postgresql://user:password@localhost:5432/hydraskript
+AUTH_SECRET=...            # NEXTAUTH_SECRET is also accepted
+NEXTAUTH_URL=http://localhost:3002
+
+# Storage (Cloudflare R2)
+R2_ACCOUNT_ID=...
+R2_ACCESS_KEY_ID=...
+R2_SECRET_ACCESS_KEY=...
+R2_BUCKET_KEY=hydraskript-assets
+R2_PUBLIC_URL=https://cdn.example.com
 
 # AI
 OPENROUTER_API_KEY=sk-or-...
@@ -146,27 +151,29 @@ NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=pk_live_...
 ### Notes
 
 - `DATABASE_URL` is required for Prisma.
-- Supabase auth requires:
-  - `NEXT_PUBLIC_SUPABASE_URL`
-  - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `AUTH_SECRET` (or the legacy `NEXTAUTH_SECRET`) is required to sign session JWTs.
+- In production `DATABASE_URL` must point at a hosted Postgres reachable from Vercel
+  (Neon via the Vercel Marketplace). `localhost` only works for local development.
 - Some AI/media flows degrade or simulate behavior if keys are absent.
 - Audiobook Studio uses Gemini native TTS through `GOOGLE_AI_API_KEY`; it produces an M4B when FFmpeg is available and a valid WAV audiobook fallback otherwise.
 - Stripe should be considered **not production-complete until webhook and billing flows are verified end-to-end**.
 
 ### Storage note
 
-The app now prefers **Supabase Storage** for generated assets when these are configured:
+The app stores generated assets in **Cloudflare R2** when these are configured:
 
-- `NEXT_PUBLIC_SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
-- `SUPABASE_STORAGE_BUCKET`
+- `R2_ACCOUNT_ID`
+- `R2_ACCESS_KEY_ID`
+- `R2_SECRET_ACCESS_KEY`
+- `R2_BUCKET_KEY`
+- `R2_PUBLIC_URL`
 
-If they are not configured, it falls back to local filesystem storage under:
+If they are not configured, it falls back to the local filesystem under:
 
 - `public/assets`
 
-For production, create a public Supabase Storage bucket matching `SUPABASE_STORAGE_BUCKET`.
-Local fallback remains useful for development, but should not be your primary production storage strategy.
+That fallback is for development only: serverless filesystems are read-only, so
+`saveFile()` refuses to write and throws a configuration error in production.
 
 ---
 
@@ -197,7 +204,7 @@ App runs at:
 
 ## Queue Activation
 
-HydraSkript uses a **custom Supabase/Postgres-backed queue**, not BullMQ.
+HydraSkript uses a **custom Postgres-backed queue**, not BullMQ.
 
 The current codebase already includes a hardened compatibility queue with:
 
@@ -264,12 +271,13 @@ Before deploying, confirm all of the following:
 - `npx eslint src --ext .ts,.tsx` passes
 - `npm run build` passes
 - `.env.local` values are mirrored into the deployment platform
-- Supabase project is configured correctly
+- `DATABASE_URL` points at a Postgres instance reachable from the deployment
+- `AUTH_SECRET` is set for the deployment scope
 - Prisma schema is synced:
   - `npm run db:generate`
   - `npm run db:push`
 - FFmpeg is available in the deployment runtime
-- Supabase Storage bucket exists and matches `SUPABASE_STORAGE_BUCKET` (or an intentional persistent-volume fallback is in place)
+- The R2 bucket exists and `R2_PUBLIC_URL` serves objects from it
 
 ---
 
@@ -306,14 +314,14 @@ The Dockerfile:
 1. Create a Railway project
 2. Connect this repository
 3. Add all required environment variables
-4. Point `DATABASE_URL` to your Supabase database or Railway Postgres
+4. Point `DATABASE_URL` to your hosted Postgres (Neon, Railway, RDS, …)
 5. Ensure schema/client sync has been run
 6. Deploy
 
 ### Recommended extra checks after deploy
 
 - open `/api/health`
-- sign in through Supabase auth
+- sign in through `/login` (NextAuth credentials)
 - create a draft book
 - hit one protected API route while logged in
 - test one generation flow
@@ -400,8 +408,8 @@ HydraSkript currently supports:
 
 These are the main remaining production limitations:
 
-1. **Storage falls back to local filesystem if Supabase Storage is not configured**
-   - generated files can still be lost on restart/redeploy if you rely on fallback storage instead of a real bucket
+1. **Storage falls back to local filesystem if R2 is not configured**
+   - that fallback only works in development; serverless runtimes refuse the write, so a real bucket is required in production
 
 2. **Queue is single-instance oriented**
    - suitable for one-node deployments today
@@ -410,7 +418,9 @@ These are the main remaining production limitations:
 3. **Stripe/payment path should be verified before launch**
    - treat payments as staging until webhook/accounting flows are validated end-to-end
 
-4. **Supabase / Prisma posture is functional, but not equivalent to full Supabase-native RLS enforcement**
+4. **Postgres authorization is application-level only**
+   - Prisma owns the schema and all access goes through the app; there is no
+     database-level RLS layer protecting rows from a compromised service role
 
 ---
 

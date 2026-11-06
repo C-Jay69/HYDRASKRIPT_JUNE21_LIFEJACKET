@@ -4,20 +4,13 @@
 
 'use client';
 
-import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import Link from 'next/link';
-import { createClient } from '@/lib/supabase/client';
+import { useSession } from 'next-auth/react';
 
 export function NavBar() {
-  const [authed, setAuthed] = useState(false);
-
-  useEffect(() => {
-    const supabase = createClient();
-    supabase.auth.getSession().then(({ data }) => {
-      setAuthed(!!data.session);
-    });
-  }, []);
+  const { status } = useSession();
+  const authed = status === 'authenticated';
 
   return (
     <nav className="sticky top-0 z-50 w-full border-b border-white/5 bg-black/80 backdrop-blur-md px-6 py-4">

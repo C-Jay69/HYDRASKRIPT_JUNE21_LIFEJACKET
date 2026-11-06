@@ -1,12 +1,12 @@
 'use client';
 
-import { useState, useMemo, useEffect, Suspense } from 'react';
+import { useState, useEffect, Suspense } from 'react';
 import { PageBackground } from '@/components/PageBackground'
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { toast } from '@/hooks/use-toast';
-import { createClient } from '@/lib/supabase/client';
+import { signIn, useSession } from 'next-auth/react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Loader2, ArrowLeft } from 'lucide-react';
 
@@ -18,15 +18,13 @@ function LoginForm() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
-  const supabase = useMemo(() => createClient(), []);
+  const { status } = useSession();
 
   const safeNext = next.startsWith('/') && !next.startsWith('//') ? next : '/dashboard';
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      if (data.session) router.replace(safeNext);
-    });
-  }, [router, safeNext, supabase]);
+    if (status === 'authenticated') router.replace(safeNext);
+  }, [status, router, safeNext]);
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -34,55 +32,47 @@ function LoginForm() {
 
     try {
       if (isSignUp) {
-        const { data, error } = await supabase.auth.signUp({
-          email,
-          password,
-          options: {
-            emailRedirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent(safeNext)}`,
-          },
+        const response = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password }),
         });
+        const result = await response.json().catch(() => null);
 
-        if (error) throw error;
-
-        if (data.user && !data.session) {
-          toast({
-            title: 'Check your email!',
-            description: 'We sent a confirmation link. Please check your inbox to activate your account.',
-          });
-          return;
+        if (!response.ok || !result?.success) {
+          throw new Error(result?.error || 'Could not create your account.');
         }
-
-        if (data.session) {
-          toast({ title: 'Welcome!', description: 'Your account has been created successfully.' });
-          router.push(safeNext);
-          return;
-        }
-      } else {
-        const { error, data } = await supabase.auth.signInWithPassword({
-          email,
-          password,
-        });
-
-        if (error) throw error;
-
-        if (data.session) {
-          toast({ title: 'Welcome back!' });
-          router.push(safeNext);
-          return;
-        }
-
-        console.error('[Auth] No session returned after sign-in');
-        toast({
-          title: 'Authentication failed',
-          description: 'Sign-in succeeded, but no session was established. Try refreshing.',
-          variant: 'destructive',
-        });
       }
-    } catch (error: any) {
+
+      const result = await signIn('credentials', {
+        email,
+        password,
+        redirect: false,
+      });
+
+      if (result?.error) {
+        throw new Error(
+          isSignUp
+            ? 'Your account was created, but sign-in failed. Please sign in again.'
+            : 'Invalid email or password.',
+        );
+      }
+
+      toast({
+        title: isSignUp ? 'Welcome!' : 'Welcome back!',
+        description: isSignUp
+          ? 'Your account has been created successfully.'
+          : undefined,
+      });
+
+      router.push(safeNext);
+      router.refresh();
+    } catch (error) {
       console.error('[Auth] Error:', error);
       toast({
         title: 'Authentication failed',
-        description: error.message || 'Please check your credentials',
+        description:
+          error instanceof Error ? error.message : 'Please check your credentials',
         variant: 'destructive',
       });
     } finally {

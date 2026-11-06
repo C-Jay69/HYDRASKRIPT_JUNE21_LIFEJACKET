@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { Menu, X, LogOut, Zap } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAppStore } from '@/lib/store';
-import { createClient } from '@/lib/supabase/client';
+import { signOut } from 'next-auth/react';
 
 export default function Navbar() {
   const router = useRouter();
@@ -14,8 +14,7 @@ export default function Navbar() {
 
   const handleSignOut = async () => {
     try {
-      const supabase = createClient();
-      await supabase.auth.signOut();
+      await signOut({ redirect: false });
     } catch (error) {
       console.error('[Navbar] signOut failed:', error);
     } finally {

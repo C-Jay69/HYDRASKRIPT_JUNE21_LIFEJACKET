@@ -18,9 +18,8 @@ import { extractTextFromBuffer, PdfReadError, SUPPORTED_MANUSCRIPT_EXTENSIONS, t
 import { maybeKickQueueForJob } from '@/lib/workers/queue-pump-client';
 import { publicJobResult } from '@/lib/job-public';
 import { isUuid } from '@/lib/uuid';
-import { supabaseAdmin } from '@/lib/supabase';
 import { getR2Client, isR2Enabled, getR2PublicUrl } from '@/lib/utils/storage';
-import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import { GetObjectCommand } from '@aws-sdk/client-s3';
 
 export const dynamic = 'force-dynamic';
 // Enqueue path is cheap now (text extraction only, no LLM work in-request).
@@ -35,24 +34,7 @@ const MAX_MANUSCRIPT_CHARS = 500000;
 const MAX_PRESIGNED_FILE_SIZE = 25 * 1024 * 1024;
 
 async function downloadFromStorage(storagePath: string): Promise<Buffer> {
-  const supabaseBucket = process.env.SUPABASE_STORAGE_BUCKET || 'hydraskript-assets';
-  const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-  // Try Supabase Storage first
-  if (supabaseUrl && supabaseServiceKey) {
-    const { data, error } = await supabaseAdmin.storage
-      .from(supabaseBucket)
-      .download(storagePath);
-
-    if (!error && data) {
-      const arrayBuffer = await data.arrayBuffer();
-      return Buffer.from(arrayBuffer);
-    }
-    console.warn('[ImportManuscript] Supabase download failed, trying R2:', error?.message);
-  }
-
-  // Try R2
+  // Try R2 first
   if (isR2Enabled()) {
     const r2Client = getR2Client();
     const command = new GetObjectCommand({

@@ -445,11 +445,11 @@ export async function importManuscriptToStoryBible(
         body: formData,
       });
     } else {
-      // Supabase (POST) or R2 (PUT) - file directly in body
+      // R2 presigned PUT — file goes in the body
       uploadResponse = await fetch(uploadUrl, {
-        method: storageProvider === 'supabase' ? 'POST' : 'PUT',
+        method: 'PUT',
         body: file,
-        headers: storageProvider === 'supabase' ? {} : { 'Content-Type': file.type },
+        headers: { 'Content-Type': file.type },
       });
     }
 

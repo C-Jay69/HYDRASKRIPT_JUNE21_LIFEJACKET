@@ -121,10 +121,6 @@ const fakeDb = {
 };
 
 jest.mock('@/lib/db', () => ({ db: fakeDb }));
-jest.mock('@/lib/supabase', () => ({
-  supabase: {},
-  supabaseAdmin: { storage: { from: () => ({ download: async () => ({ data: null, error: { message: 'no' } }) }) } },
-}));
 jest.mock('@/lib/api-auth', () => ({
   requireProfile: async () => ({ email: 'test@example.com', profile: { id: 'profile-1' } }),
   unauthorizedResponse: () => ({ status: 401 }),

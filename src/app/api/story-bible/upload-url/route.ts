@@ -4,9 +4,8 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { isUnauthorizedError, requireProfile, unauthorizedResponse } from '@/lib/api-auth';
-import { supabaseAdmin } from '@/lib/supabase';
 import { generateFilename, getR2Client, isR2Enabled, getR2PublicUrl } from '@/lib/utils/storage';
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 export const dynamic = 'force-dynamic';
@@ -54,30 +53,10 @@ export async function POST(request: NextRequest) {
 
     let uploadUrl: string;
     let publicUrl: string;
-    let storageProvider: 'supabase' | 'r2' | 'local';
+    let storageProvider: 'r2' | 'local';
 
-    // Priority: Supabase Storage → R2 → Local
-    const supabaseBucket = process.env.SUPABASE_STORAGE_BUCKET || 'hydraskript-assets';
-    const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-    if (supabaseUrl && supabaseServiceKey) {
-      // Use Supabase Storage signed URL
-      const { data, error } = await supabaseAdmin.storage
-        .from(supabaseBucket)
-        .createSignedUploadUrl(storagePath, {
-          upsert: false,
-        });
-
-      if (error || !data?.signedUrl) {
-        console.error('[UploadURL] Supabase signed URL failed:', error?.message);
-        throw new Error('Failed to create upload URL');
-      }
-
-      uploadUrl = data.signedUrl;
-      publicUrl = `${supabaseUrl}/storage/v1/object/public/${supabaseBucket}/${storagePath}`;
-      storageProvider = 'supabase';
-    } else if (isR2Enabled()) {
+    // Priority: R2 → Local
+    if (isR2Enabled()) {
       // Use Cloudflare R2 presigned URL
       const r2Client = getR2Client();
 

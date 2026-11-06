@@ -1,7 +1,6 @@
 'use client'
 
 import { useState } from 'react'
-import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -13,30 +12,37 @@ export default function ForgotPasswordPage() {
   const router = useRouter()
   const [email, setEmail] = useState('')
   const [loading, setLoading] = useState(false)
-  const supabase = createClient()
 
   const handleForgotPassword = async (e: React.FormEvent) => {
     e.preventDefault()
     setLoading(true)
 
     try {
-      const { error } = await supabase.auth.resetPasswordForEmail(email, {
-        redirectTo: `${window.location.origin}/auth/callback`,
+      const response = await fetch('/api/auth/forgot-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
       })
 
-      if (error) throw error
+      const result = await response.json().catch(() => null)
+
+      if (!response.ok || !result?.success) {
+        throw new Error(result?.error || 'Please try again.')
+      }
 
       toast({
         title: 'Check your email!',
-        description: 'We sent a password reset link. Please check your inbox.',
+        description:
+          'If an account exists for that address, a reset link has been generated.',
       })
 
       router.push('/login?reset=sent')
-    } catch (error: any) {
+    } catch (error) {
       console.error('Forgot password error:', error)
       toast({
-        title: 'Failed to send reset email',
-        description: error.message || 'Please try again.',
+        title: 'Failed to process reset request',
+        description:
+          error instanceof Error ? error.message : 'Please try again.',
         variant: 'destructive',
       })
     } finally {
@@ -60,7 +66,7 @@ export default function ForgotPasswordPage() {
         <div className="text-center mb-8">
           <h2 className="text-2xl font-bold text-white mb-2">Forgot Password?</h2>
           <p className="text-sm text-slate-400">
-            Enter your email and we'll send you a link to reset your password.
+            Enter your email and we&apos;ll send you a link to reset your password.
           </p>
         </div>
 

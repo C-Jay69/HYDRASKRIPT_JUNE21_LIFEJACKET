@@ -7,29 +7,21 @@
 //
 // Requires in .env.local:
 //   DATABASE_URL
-//   NEXT_PUBLIC_SUPABASE_URL
-//   SUPABASE_SERVICE_ROLE_KEY      (bypasses RLS; server-only)
 //
-// Assumption: HydraSkript follows the standard Supabase pattern where
-// Profile.id === auth.users.id. The upsert is safe whether or not a DB
-// trigger already created the profile row.
+// Accounts now live entirely in `profiles` (there is no separate auth.users
+// table). The password is bcrypt-hashed exactly as the signup API does it, so
+// the seeded account can sign in through /login.
 
 import dotenv from "dotenv";
 dotenv.config({ path: ".env.local" });
 
-import { createClient } from "@supabase/supabase-js";
+import bcrypt from "bcryptjs";
 import { PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { Pool } from "pg";
 
-const DEMO_EMAIL = process.env.DEMO_EMAIL || "demo@hydraforge.tech";
+const DEMO_EMAIL = (process.env.DEMO_EMAIL || "demo@hydraforge.tech").toLowerCase();
 const DEMO_PASSWORD = process.env.DEMO_PASSWORD || "demo1234";
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY,
-  { auth: { autoRefreshToken: false, persistSession: false } }
-);
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -40,30 +32,13 @@ const pool = new Pool({
 const prisma = new PrismaClient({ adapter: new PrismaPg(pool) });
 
 async function main() {
-  // 1. Create (or reuse) the Supabase auth user.
-  const { data: list } = await supabase.auth.admin.listUsers();
-  const found = list?.users?.find((u) => u.email === DEMO_EMAIL);
+  // 1. Create (or reuse) the demo account.
+  const passwordHash = await bcrypt.hash(DEMO_PASSWORD, 12);
 
-  let userId;
-  if (found) {
-    userId = found.id;
-    console.log(`reuse auth user ${userId}`);
-  } else {
-    const { data, error } = await supabase.auth.admin.createUser({
-      email: DEMO_EMAIL,
-      password: DEMO_PASSWORD,
-      email_confirm: true,
-    });
-    if (error) throw error;
-    userId = data.user.id;
-    console.log(`created auth user ${userId}`);
-  }
-
-  // 2. Upsert the Profile (id must mirror the auth user id).
-  await prisma.profile.upsert({
-    where: { id: userId },
+  const profile = await prisma.profile.upsert({
+    where: { email: DEMO_EMAIL },
     update: {
-      email: DEMO_EMAIL,
+      passwordHash,
       name: "Demo Author",
       tier: "free",
       purchasedCredits: 9999,
@@ -72,8 +47,8 @@ async function main() {
       audiobookEnabled: true,
     },
     create: {
-      id: userId,
       email: DEMO_EMAIL,
+      passwordHash,
       name: "Demo Author",
       tier: "free",
       purchasedCredits: 9999,
@@ -82,9 +57,11 @@ async function main() {
       audiobookEnabled: true,
     },
   });
-  console.log("upserted profile");
 
-  // 3. Seed a sample book (skip if one already exists for the demo user).
+  const userId = profile.id;
+  console.log(`upserted demo profile ${userId}`);
+
+  // 2. Seed a sample book (skip if one already exists for the demo user).
   const existingBook = await prisma.book.findFirst({ where: { ownerId: userId } });
   if (existingBook) {
     console.log(`demo book already exists (${existingBook.id}) — skipping`);

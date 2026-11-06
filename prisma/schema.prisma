@@ -14,6 +14,10 @@ datasource db {
 model Profile {
   id                    String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   email                 String    @unique
+  // bcrypt hash. Nullable because profiles can be created by Stripe/webhooks
+  // or lazily by the API before a password is ever set. Supabase auth.users
+  // hashes are bcrypt and can be copied here unchanged.
+  passwordHash          String?
   name                  String    @default("Anonymous Author")
   credits               Int       @default(0) // Legacy single wallet (kept for backward compatibility)
   monthlyCredits        Int       @default(0) // Monthly credits (Founder/paid plans) - do not roll over
@@ -48,6 +52,7 @@ model Profile {
   editorialReviews      EditorialReview[]
   founderSale           FounderSale?
   bookListings          BookListing[]
+  passwordResetTokens   PasswordResetToken[]
 
   @@map("profiles")
 }
@@ -405,4 +410,22 @@ model BookListing {
   @@index([ownerId])
   @@index([status])
   @@map("book_listings")
+}
+
+// ─── Password Reset ──────────────────────────────────────────────────────────
+// Replaces Supabase Auth's resetPasswordForEmail. Only the SHA-256 of the
+// token is stored, so a database read cannot be replayed as a reset link.
+
+model PasswordResetToken {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  profileId String    @db.Uuid
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  profile Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@index([profileId])
+  @@map("password_reset_tokens")
 }

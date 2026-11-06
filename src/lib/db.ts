@@ -16,38 +16,45 @@ function isServerlessRuntime(): boolean {
   )
 }
 
-// Modern `pg` treats sslmode=require as verify-full (full cert-chain
-// verification), and an sslmode found in the connection string OVERRIDES any
-// `ssl` option set in code. Supabase serves Postgres TLS from its own CA, so
-// Node rejects it ("self-signed certificate in certificate chain").
-// uselibpqcompat=true restores standard libpq semantics where sslmode=require
-// means "encrypt, do not verify".
-//
-// Direct connections (`db.<ref>.supabase.co:5432`) have a tiny session limit
-// (~15). On serverless we rewrite ONLY that host to the transaction pooler
-// port (6543). Session-mode pooler URLs (`*.pooler.supabase.com:5432`) and
-// URLs that are already on 6543 are left alone.
-export function resolveConnectionString(raw?: string): string | undefined {
-  if (!raw) return undefined
-  if (!/supabase\.(co|com)/.test(raw)) return raw
+/**
+ * Local Postgres runs without TLS (the default pdg/Ubuntu cluster has
+ * `ssl = off`). Every hosted provider used in production — Neon, Supabase,
+ * Railway, RDS — requires TLS, and `pg` treats `sslmode=require` as
+ * verify-full, which fails against a provider CA that Node doesn't ship.
+ * Setting `rejectUnauthorized: false` for non-local hosts restores the libpq
+ * meaning of "encrypt, do not verify".
+ *
+ * A hosted connection string that already carries `sslmode` still wins: pg
+ * parses sslmode out of the URL and it takes precedence over this option.
+ */
+function isLocalDatabase(raw: string | undefined): boolean {
+  if (!raw) return true
   try {
-    const u = new URL(raw)
-    u.searchParams.set('sslmode', 'require')
-    u.searchParams.set('uselibpqcompat', 'true')
-    const isDirectDbHost = /^db\./i.test(u.hostname)
-    if (isDirectDbHost && (u.port === '5432' || u.port === '')) {
-      u.port = '6543'
-    }
-    return u.toString()
+    const host = new URL(raw).hostname
+    return (
+      host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host === '::1' ||
+      host === ''
+    )
   } catch {
-    return raw
+    // Unix-socket DSNs (postgresql:///db) have no host → local.
+    return true
   }
+}
+
+export function resolveConnectionString(raw?: string): string | undefined {
+  // Kept as an extension point (and to preserve the exported API). Connection
+  // strings are used verbatim now that the Supabase pooler rewrite is gone.
+  return raw
 }
 
 function createPool(): Pool {
   const serverless = isServerlessRuntime()
+  const connectionString = resolveConnectionString(process.env.DATABASE_URL)
+
   // One or two connections per serverless instance. A pool of 10 * dozens of
-  // warm lambdas exhausts Supabase and surfaces as Prisma P2028
+  // warm lambdas exhausts a small hosted database and surfaces as Prisma P2028
   // ("Unable to start a transaction in the given time").
   const max = parseInt(
     process.env.DATABASE_POOL_MAX || (serverless ? '5' : '10'),
@@ -71,17 +78,17 @@ function createPool(): Pool {
   )
   return new Pool({
     application_name: 'hydraskript-web',
-    connectionString: resolveConnectionString(process.env.DATABASE_URL),
-    ssl: /supabase\.(co|com)/.test(process.env.DATABASE_URL ?? '')
-      ? { rejectUnauthorized: false }
-      : undefined,
+    connectionString,
+    ssl: isLocalDatabase(connectionString)
+      ? undefined
+      : { rejectUnauthorized: false },
     min: 0,
     max: Number.isFinite(max) && max > 0 ? max : serverless ? 5 : 10,
     idleTimeoutMillis: serverless ? 60_000 : 30_000,
     connectionTimeoutMillis: connectionTimeoutMs,
-    // Reap dead TCP sockets quickly: a Supabase pooler connection that died
-    // during an instance freeze otherwise sits "checked out" and stalls the
-    // next query behind it until the connect timeout expires.
+    // Reap dead TCP sockets quickly: a hosted connection that died during an
+    // instance freeze otherwise sits "checked out" and stalls the next query
+    // behind it until the connect timeout expires.
     keepAlive: true,
     keepAliveInitialDelayMillis: 10_000,
     allowExitOnIdle: serverless,
